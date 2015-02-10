@@ -1459,9 +1459,16 @@ struct fiemap_extent_info {
 	struct fiemap_extent __user *fi_extents_start; /* Start of
 							fiemap_extent array */
 };
+
+/* So that the fiemap access checks can't overflow on 32 bit machines. */
+#define FIEMAP_MAX_EXTENTS	(UINT_MAX / sizeof(struct fiemap_extent))
+
 int fiemap_fill_next_extent(struct fiemap_extent_info *info, u64 logical,
 			    u64 phys, u64 len, u32 flags);
 int fiemap_check_flags(struct fiemap_extent_info *fieinfo, u32 fs_flags);
+
+int fiemap_check_ranges(struct super_block *sb,
+			u64 start, u64 len, u64 *new_len);
 
 /*
  * File types
