@@ -1495,6 +1495,61 @@ xfs_ioc_swapext(
 }
 
 /*
+ * Mostly similar to ioctl_fiemap() function present
+ * in fs/ioctl.c
+ */
+static int
+xfs_ioctl_fiemapfs(
+	struct xfs_mount	*mp,
+	void			__user *arg)
+{
+	struct fiemap		fiemap;
+	u64			len;
+	int			error;
+
+	struct fiemap __user *ufiemap = (struct fiemap __user *) arg;
+	struct fiemap_extent_info fieinfo = { 0, };
+
+	if (copy_from_user(&fiemap, ufiemap, sizeof(fiemap)))
+		return -EFAULT;
+
+	if (fiemap.fm_extent_count > FIEMAP_MAX_EXTENTS)
+		return -EINVAL;
+
+	error = fiemap_check_ranges(mp->m_super, fiemap.fm_start, fiemap.fm_length,
+					&len);
+	if (error)
+		return error;
+
+	fieinfo.fi_flags = fiemap.fm_flags;
+	fieinfo.fi_extents_max = fiemap.fm_extent_count;
+	fieinfo.fi_extents_start = ufiemap->fm_extents;
+
+	if (fiemap.fm_extent_count != 0 &&
+		!access_ok(VERIFY_WRITE, fieinfo.fi_extents_start,
+			fieinfo.fi_extents_max * sizeof(struct fiemap_extent)))
+		return -EFAULT;
+
+	if (fiemap.fm_extent_count != 0 &&
+		(fiemap.fm_flags & XFS_FIEMAPFS_FLAG_FREESP_SIZE_HINT) &&
+		!access_ok(VERIFY_READ, fieinfo.fi_extents_start,
+			sizeof(struct fiemap_extent)))
+		return -EFAULT;
+
+	/*
+	 * XXX: no implementation yet, so just return an error!
+	 */
+	error = -EOPNOTSUPP;
+
+	fiemap.fm_flags = fieinfo.fi_flags;
+	fiemap.fm_mapped_extents = fieinfo.fi_extents_mapped;
+	if (copy_to_user(ufiemap, &fiemap, sizeof(fiemap)))
+		error = -EFAULT;
+
+	return error;
+}
+
+/*
  * Note: some of the ioctl's return positive numbers as a
  * byte count indicating success, such as readlink_by_handle.
  * So we don't "sign flip" like most other routines.  This means
@@ -1549,6 +1604,9 @@ xfs_file_ioctl(
 			return -EFAULT;
 		return 0;
 	}
+
+	case XFS_IOC_FIEMAPFS:
+		return xfs_ioctl_fiemapfs(mp, arg);
 
 	case XFS_IOC_FSBULKSTAT_SINGLE:
 	case XFS_IOC_FSBULKSTAT:

@@ -496,6 +496,13 @@ typedef struct xfs_swapext
 #define XFS_IOC_GETVERSION	FS_IOC_GETVERSION
 
 /*
+ * XFS_IOC_FIEMAPFS flags
+ */
+#define XFS_FIEMAPFS_FLAG_FREESP		0x1 /* map fs freespace tree */
+#define XFS_FIEMAPFS_FLAG_FREESP_SIZE		0x2 /* ordered by size */
+#define XFS_FIEMAPFS_FLAG_FREESP_SIZE_HINT	0x4 /* search continue request */
+
+/*
  * ioctl commands that replace IRIX fcntl()'s
  * For 'documentation' purposed more than anything else,
  * the "cmd #" field reflects the IRIX fcntl number.
@@ -505,6 +512,7 @@ typedef struct xfs_swapext
 #define XFS_IOC_DIOINFO		_IOR ('X', 30, struct dioattr)
 #define XFS_IOC_FSGETXATTR	_IOR ('X', 31, struct fsxattr)
 #define XFS_IOC_FSSETXATTR	_IOW ('X', 32, struct fsxattr)
+#define XFS_IOC_FIEMAPFS	_IOWR('X', 33, struct fiemap)
 #define XFS_IOC_ALLOCSP64	_IOW ('X', 36, struct xfs_flock64)
 #define XFS_IOC_FREESP64	_IOW ('X', 37, struct xfs_flock64)
 #define XFS_IOC_GETBMAP		_IOWR('X', 38, struct getbmap)

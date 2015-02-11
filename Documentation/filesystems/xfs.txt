@@ -359,3 +359,58 @@ Removed Sysctls
   ----				-------
   fs.xfs.xfsbufd_centisec	v3.20
   fs.xfs.age_buffer_centisecs	v3.20
+
+XFS_IOCTL_FIEMAPFS
+==================
+
+This ioctl functions the same way that the FS_IOC_FIEMAP ioctl functions, as
+documented in Documentation/filesystems/fiemap.txt. The main difference is the
+function flags that are passed to the ioctl to tell it what to do. The
+structures and flags used to describe the mapped extents are identical between
+the two ioctls.
+
+XFS_IOC_FIEMAPFS supports the following flags for mapping space in the
+filesystem:
+
+* XFS_FIEMAP_FLAG_FREESP
+
+If this flag is set, the extents returned will describe the *filesystem's* free
+space map, with fm_start specifying the start offset into the filesystems
+address range (in bytes) of the region to be mapped. fm_length is the the byte
+range that will be mapped. Free space extents will be mapped in ascending offset
+order.
+
+Filesystems with multiple freespace indexes may return FIEMAP_EXTENT_LAST at the
+end of a specific freespace index map. Hence FIEMAP_EXTENT_LAST does not mean
+there is no more free space to be mapped, just that the requested range spanned
+has multiple free space indexes.
+
+Hence the caller needs to be aware of the underlying filesystem implementation
+and geometry to make correct use of this call. As such, this functionality is
+only intended for use by filesystem management utilities (e.g. defragmentation
+tools) and not general purpose applications.
+
+* XFS_FIEMAP_FLAG_FREESP_SIZE
+
+If this flag is set, the filesystem freespace tree will be mapped similar to
+XFS_FIEMAP_FLAG_FREESP, but extents will be ordered from smallest free space
+extent to largest. Where extents have the same size, they will be ordered by
+ascending offset order similar to XFS_FIEMAP_FLAG_FREESP.
+
+The same caveats exist for this call for FIEMAP_EXTENT_LAST as for
+XFS_FIEMAP_FLAG_FREESP.
+
+* XFS_FIEMAP_FLAG_FREESP_SIZE_HINT
+
+Walking a size ordered space is different to a range space. The range must stay
+consistent across multiple calls as free space can be anywhere in the range, so
+the caller must tell the kernel what the last free space extent it saw was. This
+is done via the XFS_FIEMAP_FLAG_FREESP_SIZE_HINT flag and placing the last
+extent seen into the first extent in the output array. If the
+XFS_FIEMAP_FLAG_FREESP_SIZE_HINT flag is set, then the kernel will read this
+array entry to determine where to continue the search from.
+
+This flag can be used to start a search at a given extent length, too.  If the
+physical offset of the extent is 0, but a length is given then this is
+interpreted to mean "return free space extents of size <len> or greater.
+
