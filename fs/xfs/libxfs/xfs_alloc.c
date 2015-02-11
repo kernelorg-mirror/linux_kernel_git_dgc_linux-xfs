@@ -2633,6 +2633,68 @@ error0:
 }
 
 /*
+ * When we map free space we need to take into account the blocks
+ * that are indexed by the AGFL. They aren't found by walking the
+ * free space btrees, so we have to walk each AGFL to find them.
+ */
+static int
+xfs_alloc_agfl_freespace_map(
+	struct xfs_mount	*mp,
+	struct xfs_agf		*agf,
+	struct fiemap_extent_info *fieinfo,
+	xfs_agnumber_t		agno,
+	xfs_agblock_t		sagbno,
+	xfs_agblock_t		eagbno)
+{
+	xfs_buf_t		*agflbp;
+	__be32			*agfl_bno;
+	int			i;
+	int			error = 0;
+
+	error = xfs_alloc_read_agfl(mp, NULL, agno, &agflbp);
+	if (error)
+		return error;
+
+	agfl_bno = XFS_BUF_TO_AGFL_BNO(mp, agflbp);
+	for (i = be32_to_cpu(agf->agf_flfirst);;) {
+		xfs_agblock_t	fbno;
+		xfs_extlen_t	flen;
+		xfs_daddr_t	dbno;
+		xfs_fileoff_t	dlen;
+		int		flags = 0;
+
+		fbno = be32_to_cpu(agfl_bno[i]);
+		flen = 1;
+
+		/* range check - must be wholly withing requested range */
+		if (fbno < sagbno ||
+		    (eagbno != NULLAGBLOCK && fbno + flen > eagbno)) {
+			xfs_warn(mp, "10: %d/%d, %d/%d",
+				 sagbno, eagbno, fbno, flen);
+			continue;
+		}
+
+		/*
+		 * Use daddr format for all range/len calculations as that is
+		 * the format the range/len variables are supplied in by
+		 * userspace.
+		 */
+		dbno = XFS_AGB_TO_DADDR(mp, agno, fbno);
+		dlen = XFS_FSB_TO_BB(mp, flen);
+		error = fiemap_fill_next_extent(fieinfo, BBTOB(dbno),
+						BBTOB(dbno), BBTOB(dlen), flags);
+		if (error)
+			break;
+		if (i == be32_to_cpu(agf->agf_fllast))
+			break;
+		if (++i == XFS_AGFL_SIZE(mp))
+			i = 0;
+	}
+	xfs_buf_relse(agflbp);
+	return error;
+}
+
+/*
  * Walk the extents in the tree given by the cursor, and dump them all into the
  * fieinfo. At the last extent in the tree, set the FIEMAP_EXTENT_LAST flag so
  * that we return only free space from this tree in a given request.
@@ -2792,6 +2854,13 @@ xfs_alloc_freespace_map(
 						pag->pagf_flcount);
 			goto put_agbp;
 		}
+
+		/* Account for the free blocks in AGFL */
+		error = xfs_alloc_agfl_freespace_map(mp, XFS_BUF_TO_AGF(agbp),
+					fieinfo, agno, sagbno,
+					agno == eagno ? eagbno : NULLAGBLOCK);
+		if (error)
+			goto put_agbp;
 
 		cur = xfs_allocbt_init_cursor(mp, NULL, agbp, agno,
 					      XFS_BTNUM_BNO);
