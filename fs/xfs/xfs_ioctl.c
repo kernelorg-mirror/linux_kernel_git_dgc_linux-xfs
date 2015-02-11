@@ -1498,6 +1498,9 @@ xfs_ioc_swapext(
  * Mostly similar to ioctl_fiemap() function present
  * in fs/ioctl.c
  */
+#define __FIEMAPFS_KNOWN_FLAGS	(XFS_FIEMAPFS_FLAG_FREESP | \
+				 XFS_FIEMAPFS_FLAG_FREESP_SIZE | \
+				 XFS_FIEMAPFS_FLAG_FREESP_SIZE_HINT)
 static int
 xfs_ioctl_fiemapfs(
 	struct xfs_mount	*mp,
@@ -1512,6 +1515,9 @@ xfs_ioctl_fiemapfs(
 
 	if (copy_from_user(&fiemap, ufiemap, sizeof(fiemap)))
 		return -EFAULT;
+
+	if (fiemap.fm_flags & ~(__FIEMAPFS_KNOWN_FLAGS))
+		return -EINVAL;
 
 	if (fiemap.fm_extent_count > FIEMAP_MAX_EXTENTS)
 		return -EINVAL;
@@ -1536,10 +1542,7 @@ xfs_ioctl_fiemapfs(
 			sizeof(struct fiemap_extent)))
 		return -EFAULT;
 
-	/*
-	 * XXX: no implementation yet, so just return an error!
-	 */
-	error = -EOPNOTSUPP;
+	error = xfs_alloc_freespace_map(mp, &fieinfo, fiemap.fm_start, len);
 
 	fiemap.fm_flags = fieinfo.fi_flags;
 	fiemap.fm_mapped_extents = fieinfo.fi_extents_mapped;
