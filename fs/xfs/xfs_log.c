@@ -486,6 +486,38 @@ out_error:
  */
 
 /*
+ * Write out an unmount record using the ticket provided. We have to account for
+ * the data space used in the unmount ticket as this write is not done from a
+ * transaction context that has already done the accounting for us.
+ */
+static int
+xlog_write_unmount(
+	struct xlog		*log,
+	struct xlog_ticket	*ticket,
+	xfs_lsn_t		*lsn,
+	uint			flags)
+{
+	/* the data section must be 32 bit size aligned */
+	struct xfs_unmount_log_format magic = {
+		.magic = XLOG_UNMOUNT_TYPE,
+	};
+	struct xfs_log_iovec reg = {
+		.i_addr = &magic,
+		.i_len = sizeof(magic),
+		.i_type = XLOG_REG_TYPE_UNMOUNT,
+	};
+	struct xfs_log_vec vec = {
+		.lv_niovecs = 1,
+		.lv_iovecp = &reg,
+	};
+
+	/* account for space used by record data */
+	ticket->t_curr_res -= sizeof(magic);
+
+	return xlog_write(log, &vec, ticket, lsn, NULL, flags);
+}
+
+/*
  * Write out the commit record of a transaction associated with the given
  * ticket to close off a running log write. Return the lsn of the commit record.
  */
@@ -843,31 +875,13 @@ xfs_log_mount_cancel(
 }
 
 /*
- * Final log writes as part of unmount.
- *
- * Mark the filesystem clean as unmount happens.  Note that during relocation
- * this routine needs to be executed as part of source-bag while the
- * deallocation must not be done until source-end.
+ * Mark the filesystem clean by writing an unmount record to the head of the
+ * log.
  */
-
-/* Actually write the unmount record to disk. */
 static void
 xfs_log_write_unmount_record(
 	struct xfs_mount	*mp)
 {
-	/* the data section must be 32 bit size aligned */
-	struct xfs_unmount_log_format magic = {
-		.magic = XLOG_UNMOUNT_TYPE,
-	};
-	struct xfs_log_iovec reg = {
-		.i_addr = &magic,
-		.i_len = sizeof(magic),
-		.i_type = XLOG_REG_TYPE_UNMOUNT,
-	};
-	struct xfs_log_vec vec = {
-		.lv_niovecs = 1,
-		.lv_iovecp = &reg,
-	};
 	struct xlog		*log = mp->m_log;
 	struct xlog_in_core	*iclog;
 	struct xlog_ticket	*tic = NULL;
@@ -892,10 +906,7 @@ xfs_log_write_unmount_record(
 		flags &= ~XLOG_UNMOUNT_TRANS;
 	}
 
-	/* remove inited flag, and account for space used */
-	tic->t_flags = 0;
-	tic->t_curr_res -= sizeof(magic);
-	error = xlog_write(log, &vec, tic, &lsn, NULL, flags);
+	error = xlog_write_unmount(log, tic, &lsn, flags);
 	/*
 	 * At this point, we're umounting anyway, so there's no point in
 	 * transitioning log state to IOERROR. Just continue...
