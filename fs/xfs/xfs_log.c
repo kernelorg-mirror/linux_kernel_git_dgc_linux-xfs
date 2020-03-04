@@ -875,33 +875,27 @@ xfs_log_mount_cancel(
 }
 
 /*
- * Mark all iclogs IOERROR. l_icloglock is held by the caller.
+ * Mark all iclogs IOERROR. l_icloglock is held by the caller. Returns 1 if the
+ * log was already in an IO state, 0 otherwise. From now one, no log flushes
+ * will occur.
  */
 STATIC int
 xlog_state_ioerror(
-	struct xlog	*log)
+	struct xlog		*log)
 {
-	xlog_in_core_t	*iclog, *ic;
+	struct xlog_in_core	*iclog = log->l_iclog;
+	struct xlog_in_core	*ic = iclog;
 
 	log->l_flags |= XLOG_IO_ERROR;
+	if (iclog->ic_state == XLOG_STATE_IOERROR)
+		return 1;
 
-	iclog = log->l_iclog;
-	if (iclog->ic_state != XLOG_STATE_IOERROR) {
-		/*
-		 * Mark all the incore logs IOERROR.
-		 * From now on, no log flushes will result.
-		 */
-		ic = iclog;
-		do {
-			ic->ic_state = XLOG_STATE_IOERROR;
-			ic = ic->ic_next;
-		} while (ic != iclog);
-		return 0;
-	}
-	/*
-	 * Return non-zero, if state transition has already happened.
-	 */
-	return 1;
+	do {
+		ic->ic_state = XLOG_STATE_IOERROR;
+		ic = ic->ic_next;
+	} while (ic != iclog);
+
+	return 0;
 }
 
 /*
