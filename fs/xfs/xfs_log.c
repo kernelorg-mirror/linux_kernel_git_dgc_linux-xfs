@@ -875,6 +875,36 @@ xfs_log_mount_cancel(
 }
 
 /*
+ * Mark all iclogs IOERROR. l_icloglock is held by the caller.
+ */
+STATIC int
+xlog_state_ioerror(
+	struct xlog	*log)
+{
+	xlog_in_core_t	*iclog, *ic;
+
+	log->l_flags |= XLOG_IO_ERROR;
+
+	iclog = log->l_iclog;
+	if (iclog->ic_state != XLOG_STATE_IOERROR) {
+		/*
+		 * Mark all the incore logs IOERROR.
+		 * From now on, no log flushes will result.
+		 */
+		ic = iclog;
+		do {
+			ic->ic_state = XLOG_STATE_IOERROR;
+			ic = ic->ic_next;
+		} while (ic != iclog);
+		return 0;
+	}
+	/*
+	 * Return non-zero, if state transition has already happened.
+	 */
+	return 1;
+}
+
+/*
  * Mark the filesystem clean by writing an unmount record to the head of the
  * log.
  */
@@ -3771,34 +3801,6 @@ xlog_verify_iclog(
 #endif
 
 /*
- * Mark all iclogs IOERROR. l_icloglock is held by the caller.
- */
-STATIC int
-xlog_state_ioerror(
-	struct xlog	*log)
-{
-	xlog_in_core_t	*iclog, *ic;
-
-	iclog = log->l_iclog;
-	if (iclog->ic_state != XLOG_STATE_IOERROR) {
-		/*
-		 * Mark all the incore logs IOERROR.
-		 * From now on, no log flushes will result.
-		 */
-		ic = iclog;
-		do {
-			ic->ic_state = XLOG_STATE_IOERROR;
-			ic = ic->ic_next;
-		} while (ic != iclog);
-		return 0;
-	}
-	/*
-	 * Return non-zero, if state transition has already happened.
-	 */
-	return 1;
-}
-
-/*
  * This is called from xfs_force_shutdown, when we're forcibly
  * shutting down the filesystem, typically because of an IO error.
  * Our main objectives here are to make sure that:
@@ -3868,7 +3870,6 @@ xfs_log_force_umount(
 	 * Mark the log and the iclogs with IO error flags to prevent any
 	 * further log IO from being issued or completed.
 	 */
-	log->l_flags |= XLOG_IO_ERROR;
 	retval = xlog_state_ioerror(log);
 	spin_unlock(&log->l_icloglock);
 
