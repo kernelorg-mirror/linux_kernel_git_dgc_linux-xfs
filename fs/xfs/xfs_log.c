@@ -898,16 +898,11 @@ xlog_state_ioerror(
 	return 0;
 }
 
-/*
- * Mark the filesystem clean by writing an unmount record to the head of the
- * log.
- */
-static void
+static int
 xlog_unmount_write(
 	struct xlog		*log)
 {
 	struct xfs_mount	*mp = log->l_mp;
-	struct xlog_in_core	*iclog;
 	struct xlog_ticket	*tic = NULL;
 	xfs_lsn_t		lsn;
 	uint			flags = XLOG_UNMOUNT_TRANS;
@@ -931,61 +926,41 @@ xlog_unmount_write(
 	}
 
 	error = xlog_write_unmount_record(log, tic, &lsn, flags);
-	/*
-	 * At this point, we're umounting anyway, so there's no point in
-	 * transitioning log state to IOERROR. Just continue...
-	 */
+	if (error) {
+		/* A full shutdown is unnecessary at this point of unmount */
+		spin_lock(&log->l_icloglock);
+		log->l_flags |= XLOG_IO_ERROR;
+		xlog_state_ioerror(log);
+		spin_unlock(&log->l_icloglock);
+	}
+
+	trace_xfs_log_umount_write(log, tic);
+	xlog_ungrant_log_space(log, tic);
+	xfs_log_ticket_put(tic);
 out_err:
 	if (error)
 		xfs_alert(mp, "%s: unmount record failed", __func__);
-
-	spin_lock(&log->l_icloglock);
-	iclog = log->l_iclog;
-	atomic_inc(&iclog->ic_refcnt);
-	xlog_state_want_sync(log, iclog);
-	error = xlog_state_release_iclog(log, iclog);
-	switch (iclog->ic_state) {
-	default:
-		if (!XLOG_FORCED_SHUTDOWN(log)) {
-			xlog_wait(&iclog->ic_force_wait, &log->l_icloglock);
-			break;
-		}
-		/* fall through */
-	case XLOG_STATE_ACTIVE:
-	case XLOG_STATE_DIRTY:
-		spin_unlock(&log->l_icloglock);
-		break;
-	}
-
-	if (tic) {
-		trace_xfs_log_umount_write(log, tic);
-		xlog_ungrant_log_space(log, tic);
-		xfs_log_ticket_put(tic);
-	}
+	return error;
 }
 
 /*
- * Unmount record used to have a string "Unmount filesystem--" in the
- * data section where the "Un" was really a magic number (XLOG_UNMOUNT_TYPE).
- * We just write the magic number now since that particular field isn't
- * currently architecture converted and "Unmount" is a bit foo.
- * As far as I know, there weren't any dependencies on the old behaviour.
+ * Finalise the unmount by writing the unmount record to the log. This is the
+ * mark that the filesystem was cleanly unmounted.
+ *
+ * Avoid writing the unmount record on no-recovery mounts, ro-devices, or when
+ * the log has already been shut down.
  */
-
 static int
-xfs_log_unmount_write(xfs_mount_t *mp)
+xfs_log_unmount_write(
+	struct xfs_mount	*mp)
 {
-	struct xlog	 *log = mp->m_log;
-	xlog_in_core_t	 *iclog;
+	struct xlog		*log = mp->m_log;
+	struct xlog_in_core	*iclog;
 #ifdef DEBUG
-	xlog_in_core_t	 *first_iclog;
+	struct xlog_in_core	*first_iclog;
 #endif
-	int		 error;
+	int			error;
 
-	/*
-	 * Don't write out unmount record on norecovery mounts or ro devices.
-	 * Or, if we are doing a forced umount (typically because of IO errors).
-	 */
 	if (mp->m_flags & XFS_MOUNT_NORECOVERY ||
 	    xfs_readonly_buftarg(log->l_targ)) {
 		ASSERT(mp->m_flags & XFS_MOUNT_RDONLY);
@@ -1005,41 +980,32 @@ xfs_log_unmount_write(xfs_mount_t *mp)
 		iclog = iclog->ic_next;
 	} while (iclog != first_iclog);
 #endif
-	if (! (XLOG_FORCED_SHUTDOWN(log))) {
-		xlog_unmount_write(log);
-	} else {
-		/*
-		 * We're already in forced_shutdown mode, couldn't
-		 * even attempt to write out the unmount transaction.
-		 *
-		 * Go through the motions of sync'ing and releasing
-		 * the iclog, even though no I/O will actually happen,
-		 * we need to wait for other log I/Os that may already
-		 * be in progress.  Do this as a separate section of
-		 * code so we'll know if we ever get stuck here that
-		 * we're in this odd situation of trying to unmount
-		 * a file system that went into forced_shutdown as
-		 * the result of an unmount..
-		 */
-		spin_lock(&log->l_icloglock);
-		iclog = log->l_iclog;
-		atomic_inc(&iclog->ic_refcnt);
-		xlog_state_want_sync(log, iclog);
-		error =  xlog_state_release_iclog(log, iclog);
-		switch (iclog->ic_state) {
-		case XLOG_STATE_ACTIVE:
-		case XLOG_STATE_DIRTY:
-		case XLOG_STATE_IOERROR:
-			spin_unlock(&log->l_icloglock);
-			break;
-		default:
-			xlog_wait(&iclog->ic_force_wait, &log->l_icloglock);
-			break;
-		}
-	}
 
+	if (!XLOG_FORCED_SHUTDOWN(log))
+		error = xlog_unmount_write(log);
+
+	/*
+	 * Sync and release the current iclog so the unmount record gets to
+	 * disk. If we are in a shutdown state, no IO will be done, but we still
+	 * we need to wait for other log I/Os that may already be in progress.
+	 */
+	spin_lock(&log->l_icloglock);
+	iclog = log->l_iclog;
+	atomic_inc(&iclog->ic_refcnt);
+	xlog_state_want_sync(log, iclog);
+	error =  xlog_state_release_iclog(log, iclog);
+	switch (iclog->ic_state) {
+	case XLOG_STATE_ACTIVE:
+	case XLOG_STATE_DIRTY:
+	case XLOG_STATE_IOERROR:
+		spin_unlock(&log->l_icloglock);
+		break;
+	default:
+		xlog_wait(&iclog->ic_force_wait, &log->l_icloglock);
+		break;
+	}
 	return error;
-}	/* xfs_log_unmount_write */
+}
 
 /*
  * Empty the log for unmount/freeze.
