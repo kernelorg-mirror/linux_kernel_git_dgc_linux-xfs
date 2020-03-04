@@ -841,10 +841,11 @@ restart:
 	}
 	spin_unlock(&cil->xc_push_lock);
 
-	/* xfs_log_done always frees the ticket on error. */
-	commit_lsn = xfs_log_done(log->l_mp, tic, &commit_iclog, false);
-	if (commit_lsn == -1)
-		goto out_abort;
+	error = xlog_write_done(log, tic, &commit_iclog, &commit_lsn);
+	if (error)
+		goto out_abort_free_ticket;
+
+	xlog_ticket_done(log, tic, false);
 
 	spin_lock(&commit_iclog->ic_callback_lock);
 	if (commit_iclog->ic_state == XLOG_STATE_IOERROR) {
@@ -876,7 +877,7 @@ out_skip:
 	return 0;
 
 out_abort_free_ticket:
-	xfs_log_ticket_put(tic);
+	xlog_ticket_done(log, tic, false);
 out_abort:
 	xlog_cil_committed(ctx, true);
 	return -EIO;
@@ -1017,7 +1018,7 @@ xfs_log_commit_cil(
 	if (commit_lsn)
 		*commit_lsn = xc_commit_lsn;
 
-	xfs_log_done(mp, tp->t_ticket, NULL, regrant);
+	xlog_ticket_done(log, tp->t_ticket, regrant);
 	tp->t_ticket = NULL;
 	xfs_trans_unreserve_and_mod_sb(tp);
 
