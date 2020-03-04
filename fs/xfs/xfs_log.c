@@ -2148,22 +2148,20 @@ xlog_print_trans(
 }
 
 /*
- * Calculate the potential space needed by the log vector.  Each region gets
- * its own xlog_op_header_t and may need to be double word aligned.
+ * Calculate the potential space needed by the log vector.  We may need a
+ * start record, and each region gets its own xlog_op_header_t and may need to
+ * be double word aligned.
  */
 static int
 xlog_write_calc_vec_length(
 	struct xlog_ticket	*ticket,
-	struct xfs_log_vec	*log_vector)
+	struct xfs_log_vec	*log_vector,
+	bool			need_start_rec)
 {
 	struct xfs_log_vec	*lv;
-	int			headers = 0;
+	int			headers = need_start_rec ? 1 : 0;
 	int			len = 0;
 	int			i;
-
-	/* acct for start rec of xact */
-	if (ticket->t_flags & XLOG_TIC_INITED)
-		headers++;
 
 	for (lv = log_vector; lv; lv = lv->lv_next) {
 		/* we don't write ordered log vectors */
@@ -2186,27 +2184,16 @@ xlog_write_calc_vec_length(
 	return len;
 }
 
-/*
- * If first write for transaction, insert start record  We can't be trying to
- * commit if we are inited.  We can't have any "partial_copy" if we are inited.
- */
-static int
+static void
 xlog_write_start_rec(
 	struct xlog_op_header	*ophdr,
 	struct xlog_ticket	*ticket)
 {
-	if (!(ticket->t_flags & XLOG_TIC_INITED))
-		return 0;
-
 	ophdr->oh_tid	= cpu_to_be32(ticket->t_tid);
 	ophdr->oh_clientid = ticket->t_clientid;
 	ophdr->oh_len = 0;
 	ophdr->oh_flags = XLOG_START_TRANS;
 	ophdr->oh_res2 = 0;
-
-	ticket->t_flags &= ~XLOG_TIC_INITED;
-
-	return sizeof(struct xlog_op_header);
 }
 
 static xlog_op_header_t *
@@ -2404,25 +2391,29 @@ xlog_write(
 	int			record_cnt = 0;
 	int			data_cnt = 0;
 	int			error = 0;
+	int			start_rec_size = sizeof(struct xlog_op_header);
 
 	*start_lsn = 0;
 
-	len = xlog_write_calc_vec_length(ticket, log_vector);
 
 	/*
 	 * Region headers and bytes are already accounted for.
 	 * We only need to take into account start records and
 	 * split regions in this function.
 	 */
-	if (ticket->t_flags & XLOG_TIC_INITED)
+	if (ticket->t_flags & XLOG_TIC_INITED) {
 		ticket->t_curr_res -= sizeof(xlog_op_header_t);
+		ticket->t_flags &= ~XLOG_TIC_INITED;
+	}
 
 	/*
 	 * Commit record headers need to be accounted for. These
 	 * come in as separate writes so are easy to detect.
 	 */
-	if (flags & (XLOG_COMMIT_TRANS | XLOG_UNMOUNT_TRANS))
+	if (flags & (XLOG_COMMIT_TRANS | XLOG_UNMOUNT_TRANS)) {
 		ticket->t_curr_res -= sizeof(xlog_op_header_t);
+		start_rec_size = 0;
+	}
 
 	if (ticket->t_curr_res < 0) {
 		xfs_alert_tag(log->l_mp, XFS_PTAG_LOGRES,
@@ -2430,6 +2421,8 @@ xlog_write(
 		xlog_print_tic_res(log->l_mp, ticket);
 		xfs_force_shutdown(log->l_mp, SHUTDOWN_LOG_IO_ERROR);
 	}
+
+	len = xlog_write_calc_vec_length(ticket, log_vector, start_rec_size);
 
 	index = 0;
 	lv = log_vector;
@@ -2446,9 +2439,20 @@ xlog_write(
 		ASSERT(log_offset <= iclog->ic_size - 1);
 		ptr = iclog->ic_datap + log_offset;
 
-		/* start_lsn is the first lsn written to. That's all we need. */
+		/*
+		 * Before we start formatting log vectors, we need to write a
+		 * start record and record the lsn of the iclog that we write
+		 * the start record into. Only do this for the first iclog we
+		 * write to.
+		 */
 		if (!*start_lsn)
 			*start_lsn = be64_to_cpu(iclog->ic_header.h_lsn);
+		if (start_rec_size) {
+			xlog_write_start_rec(ptr, ticket);
+			xlog_write_adv_cnt(&ptr, &len, &log_offset,
+					start_rec_size);
+			record_cnt++;
+		}
 
 		/*
 		 * This loop writes out as many regions as can fit in the amount
@@ -2457,7 +2461,6 @@ xlog_write(
 		while (lv && (!lv->lv_niovecs || index < lv->lv_niovecs)) {
 			struct xfs_log_iovec	*reg;
 			struct xlog_op_header	*ophdr;
-			int			start_rec_copy;
 			int			copy_len;
 			int			copy_off;
 			bool			ordered = false;
@@ -2472,13 +2475,6 @@ xlog_write(
 			reg = &vecp[index];
 			ASSERT(reg->i_len % sizeof(int32_t) == 0);
 			ASSERT((unsigned long)ptr % sizeof(int32_t) == 0);
-
-			start_rec_copy = xlog_write_start_rec(ptr, ticket);
-			if (start_rec_copy) {
-				record_cnt++;
-				xlog_write_adv_cnt(&ptr, &len, &log_offset,
-						   start_rec_copy);
-			}
 
 			ophdr = xlog_write_setup_ophdr(log, ptr, ticket, flags);
 			if (!ophdr)
@@ -2509,9 +2505,14 @@ xlog_write(
 				xlog_write_adv_cnt(&ptr, &len, &log_offset,
 						   copy_len);
 			}
-			copy_len += start_rec_copy + sizeof(xlog_op_header_t);
+			copy_len += sizeof(xlog_op_header_t);
 			record_cnt++;
 			data_cnt += contwr ? copy_len : 0;
+
+			if (start_rec_size) {
+				copy_len += start_rec_size;
+				start_rec_size = 0;
+			}
 
 			error = xlog_write_copy_finish(log, iclog, flags,
 						       &record_cnt, &data_cnt,
@@ -2550,6 +2551,7 @@ next_lv:
 				break;
 			}
 		}
+		start_rec_size = 0;
 	}
 
 	ASSERT(len == 0);
