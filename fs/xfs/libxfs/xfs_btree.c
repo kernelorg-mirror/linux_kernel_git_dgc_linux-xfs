@@ -1743,7 +1743,7 @@ xfs_btree_lookup_get_block(
 
 	/* Check the inode owner since the verifiers don't. */
 	if (xfs_sb_version_hascrc(&cur->bc_mp->m_sb) &&
-	    !(cur->bc_bt.flags & XFS_BTCUR_BPRV_INVALID_OWNER) &&
+	    !(cur->bc_bt.flags & XFS_BC_BT_INVALID_OWNER) &&
 	    (cur->bc_flags & XFS_BTREE_LONG_PTRS) &&
 	    be64_to_cpu((*blkp)->bb_u.l.bb_owner) !=
 			cur->bc_bt.ip->i_ino)
