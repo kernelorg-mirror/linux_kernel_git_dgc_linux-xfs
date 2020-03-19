@@ -477,7 +477,7 @@ out_error:
  * transaction context that has already done the accounting for us.
  */
 static int
-xlog_write_unmount(
+xlog_write_unmount_record(
 	struct xlog		*log,
 	struct xlog_ticket	*ticket,
 	xfs_lsn_t		*lsn,
@@ -831,10 +831,10 @@ xlog_wait_on_iclog(
  * log.
  */
 static void
-xfs_log_write_unmount_record(
-	struct xfs_mount	*mp)
+xlog_unmount_write(
+	struct xlog		*log)
 {
-	struct xlog		*log = mp->m_log;
+	struct xfs_mount	*mp = log->l_mp;
 	struct xlog_in_core	*iclog;
 	struct xlog_ticket	*tic = NULL;
 	xfs_lsn_t		lsn;
@@ -858,7 +858,7 @@ xfs_log_write_unmount_record(
 		flags &= ~XLOG_UNMOUNT_TRANS;
 	}
 
-	error = xlog_write_unmount(log, tic, &lsn, flags);
+	error = xlog_write_unmount_record(log, tic, &lsn, flags);
 	/*
 	 * At this point, we're umounting anyway, so there's no point in
 	 * transitioning log state to IOERROR. Just continue...
@@ -924,7 +924,7 @@ xfs_log_unmount_write(
 	if (XLOG_FORCED_SHUTDOWN(log))
 		return;
 	xfs_log_unmount_verify_iclog(log);
-	xfs_log_write_unmount_record(mp);
+	xlog_unmount_write(log);
 }
 
 /*
