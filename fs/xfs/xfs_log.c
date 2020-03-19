@@ -2349,39 +2349,27 @@ xlog_write(
 	uint			flags)
 {
 	struct xlog_in_core	*iclog = NULL;
-	struct xfs_log_iovec	*vecp;
-	struct xfs_log_vec	*lv;
+	struct xfs_log_vec	*lv = log_vector;
+	struct xfs_log_iovec	*vecp = lv->lv_iovecp;
+	int			index = 0;
 	int			len;
-	int			index;
 	int			partial_copy = 0;
 	int			partial_copy_len = 0;
 	int			contwr = 0;
 	int			record_cnt = 0;
 	int			data_cnt = 0;
 	int			error = 0;
-	bool			need_start_rec = true;
-
-	*start_lsn = 0;
-
+	bool			need_start_rec;
 
 	/*
-	 * Region headers and bytes are already accounted for.
-	 * We only need to take into account start records and
-	 * split regions in this function.
+	 * If this is a commit or unmount transaction, we don't need a start
+	 * record to be written. We do, however, have to account for the
+	 * commit or unmount header that gets written. Hence we always have
+	 * to account for an extra xlog_op_header here.
 	 */
-	if (ticket->t_flags & XLOG_TIC_INITED) {
-		ticket->t_curr_res -= sizeof(struct xlog_op_header);
+	ticket->t_curr_res -= sizeof(struct xlog_op_header);
+	if (ticket->t_flags & XLOG_TIC_INITED)
 		ticket->t_flags &= ~XLOG_TIC_INITED;
-	}
-
-	/*
-	 * Commit record headers need to be accounted for. These
-	 * come in as separate writes so are easy to detect.
-	 */
-	if (flags & (XLOG_COMMIT_TRANS | XLOG_UNMOUNT_TRANS)) {
-		ticket->t_curr_res -= sizeof(struct xlog_op_header);
-		need_start_rec = false;
-	}
 
 	if (ticket->t_curr_res < 0) {
 		xfs_alert_tag(log->l_mp, XFS_PTAG_LOGRES,
@@ -2390,11 +2378,9 @@ xlog_write(
 		xfs_force_shutdown(log->l_mp, SHUTDOWN_LOG_IO_ERROR);
 	}
 
+	need_start_rec = !(flags & (XLOG_COMMIT_TRANS | XLOG_UNMOUNT_TRANS));
 	len = xlog_write_calc_vec_length(ticket, log_vector, need_start_rec);
-
-	index = 0;
-	lv = log_vector;
-	vecp = lv->lv_iovecp;
+	*start_lsn = 0;
 	while (lv && (!lv->lv_niovecs || index < lv->lv_niovecs)) {
 		void		*ptr;
 		int		log_offset;
