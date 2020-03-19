@@ -843,7 +843,7 @@ restart:
 	if (error)
 		goto out_abort_free_ticket;
 
-	xlog_ticket_done(log, tic, false);
+	xlog_ticket_done(log, tic);
 
 	spin_lock(&commit_iclog->ic_callback_lock);
 	if (commit_iclog->ic_state == XLOG_STATE_IOERROR) {
@@ -876,7 +876,7 @@ out_skip:
 	return;
 
 out_abort_free_ticket:
-	xlog_ticket_done(log, tic, false);
+	xlog_ticket_done(log, tic);
 out_abort:
 	ASSERT(XLOG_FORCED_SHUTDOWN(log));
 	xlog_cil_committed(ctx);
@@ -1008,7 +1008,10 @@ xfs_log_commit_cil(
 	if (commit_lsn)
 		*commit_lsn = xc_commit_lsn;
 
-	xlog_ticket_done(log, tp->t_ticket, regrant);
+	if (regrant)
+		xlog_ticket_regrant(log, tp->t_ticket);
+	else
+		xlog_ticket_done(log, tp->t_ticket);
 	tp->t_ticket = NULL;
 	xfs_trans_unreserve_and_mod_sb(tp);
 

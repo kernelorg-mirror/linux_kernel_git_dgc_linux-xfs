@@ -445,8 +445,8 @@ int xlog_write(struct xlog *log, struct xfs_log_vec *log_vector,
 			struct xlog_in_core **commit_iclog, uint flags);
 int xlog_write_done(struct xlog *log, struct xlog_ticket *ticket,
 			struct xlog_in_core **iclog, xfs_lsn_t *lsn);
-void xlog_ticket_done(struct xlog *log, struct xlog_ticket *ticket,
-			bool regrant);
+void xlog_ticket_done(struct xlog *log, struct xlog_ticket *ticket);
+void xlog_ticket_regrant(struct xlog *log, struct xlog_ticket *ticket);
 
 /*
  * When we crack an atomic LSN, we sample it first so that the value will not
