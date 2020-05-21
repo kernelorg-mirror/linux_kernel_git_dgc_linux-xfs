@@ -143,15 +143,10 @@ static inline void
 xfs_clear_li_failed(
 	struct xfs_log_item	*lip)
 {
-	struct xfs_buf	*bp = lip->li_buf;
-
 	ASSERT(test_bit(XFS_LI_IN_AIL, &lip->li_flags));
 	lockdep_assert_held(&lip->li_ailp->ail_lock);
 
-	if (test_and_clear_bit(XFS_LI_FAILED, &lip->li_flags)) {
-		lip->li_buf = NULL;
-		xfs_buf_rele(bp);
-	}
+	clear_bit(XFS_LI_FAILED, &lip->li_flags);
 }
 
 static inline void
@@ -161,10 +156,7 @@ xfs_set_li_failed(
 {
 	lockdep_assert_held(&lip->li_ailp->ail_lock);
 
-	if (!test_and_set_bit(XFS_LI_FAILED, &lip->li_flags)) {
-		xfs_buf_hold(bp);
-		lip->li_buf = bp;
-	}
+	set_bit(XFS_LI_FAILED, &lip->li_flags);
 }
 
 #endif	/* __XFS_TRANS_PRIV_H__ */
