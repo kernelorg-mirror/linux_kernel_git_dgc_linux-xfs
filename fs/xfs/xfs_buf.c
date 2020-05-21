@@ -1204,9 +1204,18 @@ xfs_buf_ioend(
 		bp->b_flags |= XBF_DONE;
 	}
 
+	if (read)
+		goto out_finish;
+
 	/* inodes always have a callback on write */
-	if (!read && (bp->b_flags & _XBF_INODES)) {
+	if (bp->b_flags & _XBF_INODES) {
 		xfs_buf_inode_iodone(bp);
+		return;
+	}
+
+	/* dquots always have a callback on write */
+	if (bp->b_flags & _XBF_DQUOTS) {
+		xfs_buf_dquot_iodone(bp);
 		return;
 	}
 
@@ -1215,6 +1224,7 @@ xfs_buf_ioend(
 		return;
 	}
 
+out_finish:
 	xfs_buf_ioend_finish(bp);
 }
 
