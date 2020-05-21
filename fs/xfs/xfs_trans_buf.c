@@ -465,23 +465,16 @@ xfs_trans_dirty_buf(
 
 	ASSERT(bp->b_transp == tp);
 	ASSERT(bip != NULL);
-	ASSERT(bp->b_iodone == NULL ||
-	       bp->b_iodone == xfs_buf_iodone_callbacks);
 
 	/*
 	 * Mark the buffer as needing to be written out eventually,
 	 * and set its iodone function to remove the buffer's buf log
 	 * item from the AIL and free it when the buffer is flushed
-	 * to disk.  See xfs_buf_attach_iodone() for more details
-	 * on li_cb and xfs_buf_iodone_callbacks().
-	 * If we end up aborting this transaction, we trap this buffer
-	 * inside the b_bdstrat callback so that this won't get written to
-	 * disk.
+	 * to disk.
 	 */
 	bp->b_flags |= XBF_DONE;
 
 	ASSERT(atomic_read(&bip->bli_refcount) > 0);
-	bp->b_iodone = xfs_buf_iodone_callbacks;
 	bip->bli_item.li_cb = xfs_buf_iodone;
 
 	/*
