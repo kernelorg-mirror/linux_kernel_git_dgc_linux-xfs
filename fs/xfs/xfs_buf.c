@@ -14,6 +14,8 @@
 #include "xfs_mount.h"
 #include "xfs_trace.h"
 #include "xfs_log.h"
+#include "xfs_trans.h"
+#include "xfs_buf_item.h"
 #include "xfs_errortag.h"
 #include "xfs_error.h"
 
@@ -1202,12 +1204,18 @@ xfs_buf_ioend(
 		bp->b_flags |= XBF_DONE;
 	}
 
-	if (bp->b_iodone)
+	/* inodes always have a callback on write */
+	if (!read && (bp->b_flags & _XBF_INODES)) {
+		xfs_buf_inode_iodone(bp);
+		return;
+	}
+
+	if (bp->b_iodone) {
 		(*(bp->b_iodone))(bp);
-	else if (bp->b_flags & XBF_ASYNC)
-		xfs_buf_relse(bp);
-	else
-		complete(&bp->b_iowait);
+		return;
+	}
+
+	xfs_buf_ioend_finish(bp);
 }
 
 static void
