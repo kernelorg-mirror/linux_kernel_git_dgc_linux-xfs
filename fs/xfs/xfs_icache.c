@@ -1049,10 +1049,9 @@ xfs_inode_ag_iterator_tag(
  * Grab the inode for reclaim exclusively.
  * Return 0 if we grabbed it, non-zero otherwise.
  */
-STATIC int
+static int
 xfs_reclaim_inode_grab(
-	struct xfs_inode	*ip,
-	int			flags)
+	struct xfs_inode	*ip)
 {
 	ASSERT(rcu_read_lock_held());
 
@@ -1061,12 +1060,10 @@ xfs_reclaim_inode_grab(
 		return 1;
 
 	/*
-	 * If we are asked for non-blocking operation, do unlocked checks to
-	 * see if the inode already is being flushed or in reclaim to avoid
-	 * lock traffic.
+	 * Do unlocked checks to see if the inode already is being flushed or in
+	 * reclaim to avoid lock traffic.
 	 */
-	if ((flags & SYNC_TRYLOCK) &&
-	    __xfs_iflags_test(ip, XFS_IFLOCK | XFS_IRECLAIM))
+	if (__xfs_iflags_test(ip, XFS_IFLOCK | XFS_IRECLAIM))
 		return 1;
 
 	/*
@@ -1133,8 +1130,7 @@ xfs_reclaim_inode_grab(
 static bool
 xfs_reclaim_inode(
 	struct xfs_inode	*ip,
-	struct xfs_perag	*pag,
-	int			sync_mode)
+	struct xfs_perag	*pag)
 {
 	xfs_ino_t		ino = ip->i_ino; /* for radix_tree_delete */
 
@@ -1224,7 +1220,6 @@ reclaim:
 static int
 xfs_reclaim_inodes_ag(
 	struct xfs_mount	*mp,
-	int			flags,
 	int			*nr_to_scan)
 {
 	struct xfs_perag	*pag;
@@ -1262,7 +1257,7 @@ xfs_reclaim_inodes_ag(
 			for (i = 0; i < nr_found; i++) {
 				struct xfs_inode *ip = batch[i];
 
-				if (done || xfs_reclaim_inode_grab(ip, flags))
+				if (done || xfs_reclaim_inode_grab(ip))
 					batch[i] = NULL;
 
 				/*
@@ -1293,7 +1288,7 @@ xfs_reclaim_inodes_ag(
 			for (i = 0; i < nr_found; i++) {
 				if (!batch[i])
 					continue;
-				if (!xfs_reclaim_inode(batch[i], pag, flags))
+				if (!xfs_reclaim_inode(batch[i], pag))
 					skipped++;
 			}
 
@@ -1319,13 +1314,13 @@ xfs_reclaim_inodes(
 	int		nr_to_scan = INT_MAX;
 	int		skipped;
 
-	xfs_reclaim_inodes_ag(mp, mode, &nr_to_scan);
+	xfs_reclaim_inodes_ag(mp, &nr_to_scan);
 	if (!(mode & SYNC_WAIT))
 		return 0;
 
 	do {
 		xfs_ail_push_all_sync(mp->m_ail);
-		skipped = xfs_reclaim_inodes_ag(mp, mode, &nr_to_scan);
+		skipped = xfs_reclaim_inodes_ag(mp, &nr_to_scan);
 	} while (skipped > 0);
 
 	return 0;
@@ -1349,7 +1344,7 @@ xfs_reclaim_inodes_nr(
 	xfs_reclaim_work_queue(mp);
 	xfs_ail_push_all(mp->m_ail);
 
-	xfs_reclaim_inodes_ag(mp, SYNC_TRYLOCK, &nr_to_scan);
+	xfs_reclaim_inodes_ag(mp, &nr_to_scan);
 	return 0;
 }
 
