@@ -523,11 +523,20 @@ xfs_inode_item_push(
 	}
 	spin_unlock(&lip->li_ailp->ail_lock);
 
-	error = xfs_iflush_cluster(ip, bp);
+	/*
+	 * We need to hold a reference for flushing the cluster buffer as it may
+	 * fail the buffer without IO submission. In which case, we better have
+	 * a reference for that completion as otherwise we don't get a reference
+	 * for IO until we queue it for delwri submission.
+	 */
+	xfs_buf_hold(bp);
+	error = xfs_iflush_cluster(bp);
 	if (!error) {
-		if (!xfs_buf_delwri_queue(bp, buffer_list))
+		if (!xfs_buf_delwri_queue(bp, buffer_list)) {
+			ASSERT(0);
 			rval = XFS_ITEM_FLUSHING;
-		xfs_buf_unlock(bp);
+		}
+		xfs_buf_relse(bp);
 	} else {
 		rval = XFS_ITEM_LOCKED;
 	}
