@@ -504,53 +504,35 @@ xfs_inode_item_push(
 	uint			rval = XFS_ITEM_SUCCESS;
 	int			error;
 
-	if (xfs_ipincount(ip) > 0)
+	ASSERT(iip->ili_item.li_buf);
+
+	if (xfs_ipincount(ip) > 0 || xfs_buf_ispinned(bp) ||
+	    (ip->i_flags & XFS_ISTALE))
 		return XFS_ITEM_PINNED;
 
-	if (!xfs_ilock_nowait(ip, XFS_ILOCK_SHARED))
+	/* If the inode is already flush locked, we're already flushing. */
+	if (xfs_isiflocked(ip))
+		return XFS_ITEM_FLUSHING;
+
+	if (!xfs_buf_trylock(bp))
 		return XFS_ITEM_LOCKED;
 
-	/*
-	 * Re-check the pincount now that we stabilized the value by
-	 * taking the ilock.
-	 */
-	if (xfs_ipincount(ip) > 0) {
-		rval = XFS_ITEM_PINNED;
-		goto out_unlock;
+	if (bp->b_flags & _XBF_DELWRI_Q) {
+		xfs_buf_unlock(bp);
+		return XFS_ITEM_FLUSHING;
 	}
-
-	/*
-	 * Stale inode items should force out the iclog.
-	 */
-	if (ip->i_flags & XFS_ISTALE) {
-		rval = XFS_ITEM_PINNED;
-		goto out_unlock;
-	}
-
-	/*
-	 * Someone else is already flushing the inode.  Nothing we can do
-	 * here but wait for the flush to finish and remove the item from
-	 * the AIL.
-	 */
-	if (!xfs_iflock_nowait(ip)) {
-		rval = XFS_ITEM_FLUSHING;
-		goto out_unlock;
-	}
-
-	ASSERT(iip->ili_fields != 0 || XFS_FORCED_SHUTDOWN(ip->i_mount));
 	spin_unlock(&lip->li_ailp->ail_lock);
 
-	error = xfs_iflush(ip, &bp);
+	error = xfs_iflush_cluster(ip, bp);
 	if (!error) {
 		if (!xfs_buf_delwri_queue(bp, buffer_list))
 			rval = XFS_ITEM_FLUSHING;
-		xfs_buf_relse(bp);
-	} else if (error == -EAGAIN)
+		xfs_buf_unlock(bp);
+	} else {
 		rval = XFS_ITEM_LOCKED;
+	}
 
 	spin_lock(&lip->li_ailp->ail_lock);
-out_unlock:
-	xfs_iunlock(ip, XFS_ILOCK_SHARED);
 	return rval;
 }
 
@@ -567,6 +549,7 @@ xfs_inode_item_release(
 
 	ASSERT(ip->i_itemp != NULL);
 	ASSERT(xfs_isilocked(ip, XFS_ILOCK_EXCL));
+	ASSERT(lip->li_buf || !test_bit(XFS_LI_DIRTY, &lip->li_flags));
 
 	lock_flags = iip->ili_lock_flags;
 	iip->ili_lock_flags = 0;
