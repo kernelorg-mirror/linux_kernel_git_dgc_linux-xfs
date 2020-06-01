@@ -12,6 +12,7 @@
 #include "xfs_bit.h"
 #include "xfs_mount.h"
 #include "xfs_trans.h"
+#include "xfs_trans_priv.h"
 #include "xfs_buf_item.h"
 #include "xfs_inode.h"
 #include "xfs_inode_item.h"
@@ -955,37 +956,6 @@ xfs_buf_item_relse(
 	xfs_buf_item_free(bip);
 }
 
-/*
- * Invoke the error state callback for each log item affected by the failed I/O.
- *
- * If a metadata buffer write fails with a non-permanent error, the buffer is
- * eventually resubmitted and so the completion callbacks are not run. The error
- * state may need to be propagated to the log items attached to the buffer,
- * however, so the next AIL push of the item knows hot to handle it correctly.
- */
-STATIC void
-xfs_buf_do_callbacks_fail(
-	struct xfs_buf		*bp)
-{
-	struct xfs_ail		*ailp = bp->b_mount->m_ail;
-	struct xfs_log_item	*lip;
-
-	/*
-	 * Buffer log item errors are handled directly by xfs_buf_item_push()
-	 * and xfs_buf_iodone_callback_error, and they have no IO error
-	 * callbacks. Check only for items in b_li_list.
-	 */
-	if (list_empty(&bp->b_li_list))
-		return;
-
-	spin_lock(&ailp->ail_lock);
-	list_for_each_entry(lip, &bp->b_li_list, li_bio_list) {
-		if (lip->li_ops->iop_error)
-			lip->li_ops->iop_error(lip, bp);
-	}
-	spin_unlock(&ailp->ail_lock);
-}
-
 static bool
 xfs_buf_ioerror_sync(
 	struct xfs_buf		*bp)
@@ -1154,13 +1124,18 @@ xfs_buf_inode_iodone(
 	struct xfs_buf		*bp)
 {
 	if (bp->b_error) {
+		struct xfs_log_item *lip;
 		int ret = xfs_buf_iodone_error(bp);
 		if (!ret)
 			goto finish_iodone;
 		if (ret == 1)
 			return;
 		ASSERT(ret == 2);
-		xfs_buf_do_callbacks_fail(bp);
+		spin_lock(&bp->b_mount->m_ail->ail_lock);
+		list_for_each_entry(lip, &bp->b_li_list, li_bio_list) {
+			xfs_set_li_failed(lip, bp);
+		}
+		spin_unlock(&bp->b_mount->m_ail->ail_lock);
 		xfs_buf_relse(bp);
 		return;
 	}
@@ -1180,13 +1155,18 @@ xfs_buf_dquot_iodone(
 	struct xfs_buf		*bp)
 {
 	if (bp->b_error) {
+		struct xfs_log_item *lip;
 		int ret = xfs_buf_iodone_error(bp);
 		if (!ret)
 			goto finish_iodone;
 		if (ret == 1)
 			return;
 		ASSERT(ret == 2);
-		xfs_buf_do_callbacks_fail(bp);
+		spin_lock(&bp->b_mount->m_ail->ail_lock);
+		list_for_each_entry(lip, &bp->b_li_list, li_bio_list) {
+			xfs_set_li_failed(lip, bp);
+		}
+		spin_unlock(&bp->b_mount->m_ail->ail_lock);
 		xfs_buf_relse(bp);
 		return;
 	}
@@ -1216,7 +1196,7 @@ xfs_buf_iodone(
 		if (ret == 1)
 			return;
 		ASSERT(ret == 2);
-		xfs_buf_do_callbacks_fail(bp);
+		ASSERT(list_empty(&bp->b_li_list));
 		xfs_buf_relse(bp);
 		return;
 	}
