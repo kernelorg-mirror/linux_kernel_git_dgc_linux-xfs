@@ -665,10 +665,7 @@ xfs_inode_item_destroy(
  *
  * Note: Now that we attach the log item to the buffer when we first log the
  * inode in memory, we can have unflushed inodes on the buffer list here. These
- * inodes will have a zero ili_last_fields, so skip over them here. We do
- * this check -after- we've checked for stale inodes, because we're guaranteed
- * to have XFS_ISTALE set in the case that dirty inodes are in the CIL and have
- * not yet had their dirtying transactions committed to disk.
+ * inodes will have a zero ili_last_fields, so skip over them here.
  */
 void
 xfs_iflush_done(
@@ -686,8 +683,8 @@ xfs_iflush_done(
 	 */
 	list_for_each_entry_safe(lip, n, &bp->b_li_list, li_bio_list) {
 		iip = INODE_ITEM(lip);
+
 		if (xfs_iflags_test(iip->ili_inode, XFS_ISTALE)) {
-			list_del_init(&lip->li_bio_list);
 			xfs_iflush_abort(iip->ili_inode);
 			continue;
 		}
@@ -740,12 +737,16 @@ xfs_iflush_done(
 		/*
 		 * Remove the reference to the cluster buffer if the inode is
 		 * clean in memory. Drop the buffer reference once we've dropped
-		 * the locks we hold.
+		 * the locks we hold. If the inode is dirty in memory, we need
+		 * to put the inode item back on the buffer list for another
+		 * pass through the flush machinery.
 		 */
 		ASSERT(iip->ili_item.li_buf == bp);
 		if (!iip->ili_fields) {
 			iip->ili_item.li_buf = NULL;
 			drop_buffer = true;
+		} else {
+			list_add(&lip->li_bio_list, &bp->b_li_list);
 		}
 		iip->ili_last_fields = 0;
 		iip->ili_flush_lsn = 0;
@@ -789,6 +790,7 @@ xfs_iflush_abort(
 		iip->ili_flush_lsn = 0;
 		bp = iip->ili_item.li_buf;
 		iip->ili_item.li_buf = NULL;
+		list_del_init(&iip->ili_item.li_bio_list);
 		spin_unlock(&iip->ili_lock);
 	}
 	xfs_ifunlock(ip);
