@@ -160,24 +160,6 @@ xfs_reclaim_work_queue(
 	rcu_read_unlock();
 }
 
-/*
- * This is a fast pass over the inode cache to try to get reclaim moving on as
- * many inodes as possible in a short period of time. It kicks itself every few
- * seconds, as well as being kicked by the inode cache shrinker when memory
- * goes low. It scans as quickly as possible avoiding locked inodes or those
- * already being flushed, and once done schedules a future pass.
- */
-void
-xfs_reclaim_worker(
-	struct work_struct *work)
-{
-	struct xfs_mount *mp = container_of(to_delayed_work(work),
-					struct xfs_mount, m_reclaim_work);
-
-	xfs_reclaim_inodes(mp, 0);
-	xfs_reclaim_work_queue(mp);
-}
-
 static void
 xfs_perag_set_reclaim_tag(
 	struct xfs_perag	*pag)
@@ -1298,24 +1280,17 @@ xfs_reclaim_inodes_ag(
 	return skipped;
 }
 
-int
+void
 xfs_reclaim_inodes(
-	xfs_mount_t	*mp,
-	int		mode)
+	struct xfs_mount	*mp)
 {
 	int		nr_to_scan = INT_MAX;
 	int		skipped;
-
-	xfs_reclaim_inodes_ag(mp, &nr_to_scan);
-	if (!(mode & SYNC_WAIT))
-		return 0;
 
 	do {
 		xfs_ail_push_all_sync(mp->m_ail);
 		skipped = xfs_reclaim_inodes_ag(mp, &nr_to_scan);
 	} while (skipped > 0);
-
-	return 0;
 }
 
 /*
@@ -1432,6 +1407,25 @@ xfs_inode_matches_eofb(
 		return false;
 
 	return true;
+}
+
+/*
+ * This is a fast pass over the inode cache to try to get reclaim moving on as
+ * many inodes as possible in a short period of time. It kicks itself every few
+ * seconds, as well as being kicked by the inode cache shrinker when memory
+ * goes low. It scans as quickly as possible avoiding locked inodes or those
+ * already being flushed, and once done schedules a future pass.
+ */
+void
+xfs_reclaim_worker(
+	struct work_struct *work)
+{
+	struct xfs_mount *mp = container_of(to_delayed_work(work),
+					struct xfs_mount, m_reclaim_work);
+	int		nr_to_scan = INT_MAX;
+
+	xfs_reclaim_inodes_ag(mp, &nr_to_scan);
+	xfs_reclaim_work_queue(mp);
 }
 
 STATIC int
