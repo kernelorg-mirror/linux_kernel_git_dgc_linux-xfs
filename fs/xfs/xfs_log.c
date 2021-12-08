@@ -966,8 +966,7 @@ xlog_write_unmount_record(
 	/* account for space used by record data */
 	ticket->t_curr_res -= sizeof(unmount_rec);
 
-	return xlog_write(log, NULL, &vec, ticket, XLOG_UNMOUNT_TRANS,
-			reg.i_len);
+	return xlog_write(log, NULL, &vec, ticket, reg.i_len);
 }
 
 /*
@@ -2483,7 +2482,6 @@ xlog_write(
 	struct xfs_cil_ctx	*ctx,
 	struct xfs_log_vec	*log_vector,
 	struct xlog_ticket	*ticket,
-	uint			optype,
 	uint32_t		len)
 
 {
