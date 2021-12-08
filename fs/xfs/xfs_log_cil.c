@@ -1030,6 +1030,7 @@ xlog_cil_push_work(
 	struct bio		bio;
 	DECLARE_COMPLETION_ONSTACK(bdev_flush);
 	bool			push_commit_stable;
+	struct xlog_ticket	*ticket;
 
 	new_ctx = xlog_cil_ctx_alloc();
 	new_ctx->ticket = xlog_cil_ticket_alloc(log);
@@ -1190,6 +1191,15 @@ xlog_cil_push_work(
 	wait_for_completion(&bdev_flush);
 
 	/*
+	 * Grab the ticket from the ctx so we can ungrant it after releasing the
+	 * commit_iclog. The ctx may be freed by the time we return from
+	 * releasing the commit_iclog (i.e. checkpoint has been completed and
+	 * callback run) so we can't reference the ctx after the call to
+	 * xlog_state_release_iclog().
+	 */
+	ticket = ctx->ticket;
+
+	/*
 	 * Take the lvhdr back off the lv_chain immediately after calling
 	 * xlog_cil_write_chain() as it should not be passed to log IO
 	 * completion.
@@ -1202,8 +1212,6 @@ xlog_cil_push_work(
 	error = xlog_cil_write_commit_record(ctx);
 	if (error)
 		goto out_abort_free_ticket;
-
-	xfs_log_ticket_ungrant(log, ctx->ticket);
 
 	/*
 	 * If the checkpoint spans multiple iclogs, wait for all previous iclogs
@@ -1253,11 +1261,14 @@ xlog_cil_push_work(
 	if (push_commit_stable &&
 	    ctx->commit_iclog->ic_state == XLOG_STATE_ACTIVE)
 		xlog_state_switch_iclogs(log, ctx->commit_iclog, 0);
-	xlog_state_release_iclog(log, ctx->commit_iclog, preflush_tail_lsn);
+	ticket = ctx->ticket;
+	xlog_state_release_iclog(log, ctx->commit_iclog, ticket,
+			preflush_tail_lsn);
 
 	/* Not safe to reference ctx now! */
 
 	spin_unlock(&log->l_icloglock);
+	xfs_log_ticket_ungrant(log, ticket);
 	return;
 
 out_skip:
@@ -1267,16 +1278,18 @@ out_skip:
 	return;
 
 out_abort_free_ticket:
-	xfs_log_ticket_ungrant(log, ctx->ticket);
 	ASSERT(xlog_is_shutdown(log));
 	if (!ctx->commit_iclog) {
+		xfs_log_ticket_ungrant(log, ctx->ticket);
 		xlog_cil_committed(ctx);
 		return;
 	}
 	spin_lock(&log->l_icloglock);
-	xlog_state_release_iclog(log, ctx->commit_iclog, 0);
+	ticket = ctx->ticket;
+	xlog_state_release_iclog(log, ctx->commit_iclog, ticket, 0);
 	/* Not safe to reference ctx now! */
 	spin_unlock(&log->l_icloglock);
+	xfs_log_ticket_ungrant(log, ticket);
 }
 
 /*
