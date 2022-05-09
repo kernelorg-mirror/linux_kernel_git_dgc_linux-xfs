@@ -584,6 +584,7 @@ xfs_attr_is_shortform(
 static inline enum xfs_delattr_state
 xfs_attr_init_add_state(struct xfs_da_args *args)
 {
+	args->op_flags |= XFS_DA_OP_ADDNAME;
 	if (!args->dp->i_afp)
 		return XFS_DAS_DONE;
 	if (xfs_attr_is_shortform(args->dp))
@@ -596,6 +597,7 @@ xfs_attr_init_add_state(struct xfs_da_args *args)
 static inline enum xfs_delattr_state
 xfs_attr_init_remove_state(struct xfs_da_args *args)
 {
+	args->op_flags |= XFS_DA_OP_REMOVE;
 	if (xfs_attr_is_shortform(args->dp))
 		return XFS_DAS_SF_REMOVE;
 	if (xfs_attr_is_leaf(args->dp))
@@ -606,6 +608,7 @@ xfs_attr_init_remove_state(struct xfs_da_args *args)
 static inline enum xfs_delattr_state
 xfs_attr_init_replace_state(struct xfs_da_args *args)
 {
+	args->op_flags |= XFS_DA_OP_ADDNAME | XFS_DA_OP_REPLACE;
 	return xfs_attr_init_add_state(args);
 }
 
