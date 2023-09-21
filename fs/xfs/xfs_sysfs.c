@@ -376,14 +376,11 @@ STATIC ssize_t
 reserve_grant_head_show(
 	struct kobject	*kobject,
 	char		*buf)
-
 {
-	int cycle;
-	int bytes;
-	struct xlog *log = to_xlog(kobject);
+	struct xlog	*log = to_xlog(kobject);
+	uint64_t	bytes = atomic64_read(&log->l_reserve_head.grant);
 
-	xlog_crack_grant_head(&log->l_reserve_head.grant, &cycle, &bytes);
-	return sysfs_emit(buf, "%d:%d\n", cycle, bytes);
+	return sysfs_emit(buf, "%lld\n", bytes);
 }
 XFS_SYSFS_ATTR_RO(reserve_grant_head);
 
@@ -392,12 +389,10 @@ write_grant_head_show(
 	struct kobject	*kobject,
 	char		*buf)
 {
-	int cycle;
-	int bytes;
-	struct xlog *log = to_xlog(kobject);
+	struct xlog	*log = to_xlog(kobject);
+	uint64_t	bytes = atomic64_read(&log->l_write_head.grant);
 
-	xlog_crack_grant_head(&log->l_write_head.grant, &cycle, &bytes);
-	return sysfs_emit(buf, "%d:%d\n", cycle, bytes);
+	return sysfs_emit(buf, "%lld\n", bytes);
 }
 XFS_SYSFS_ATTR_RO(write_grant_head);
 
