@@ -112,16 +112,19 @@ xfs_trans_dup(
 	ntp->t_flags = XFS_TRANS_PERM_LOG_RES |
 		       (tp->t_flags & XFS_TRANS_RESERVE) |
 		       (tp->t_flags & XFS_TRANS_NO_WRITECOUNT) |
-		       (tp->t_flags & XFS_TRANS_RES_FDBLKS);
+		       (tp->t_flags & XFS_TRANS_RES_FDBLKS) |
+		       (tp->t_flags & XFS_TRANS_RENEW_BLKRES);
 	/* We gave our writer reference to the new transaction */
 	tp->t_flags |= XFS_TRANS_NO_WRITECOUNT;
 	ntp->t_ticket = xfs_log_ticket_get(tp->t_ticket);
 
 	ASSERT(tp->t_blk_res >= tp->t_blk_res_used);
 	ntp->t_blk_res = tp->t_blk_res - tp->t_blk_res_used;
+	ntp->t_blk_res_orig = tp->t_blk_res_orig;
 	tp->t_blk_res = tp->t_blk_res_used;
 
 	ntp->t_rtx_res = tp->t_rtx_res - tp->t_rtx_res_used;
+	ntp->t_rtx_res_orig = tp->t_rtx_res_orig;
 	tp->t_rtx_res = tp->t_rtx_res_used;
 
 	/* move deferred ops over to the new tp */
@@ -164,6 +167,7 @@ xfs_trans_reserve(
 		if (error != 0)
 			return -ENOSPC;
 		tp->t_blk_res += blocks;
+		tp->t_blk_res_orig = tp->t_blk_res;
 	}
 
 	/*
@@ -191,6 +195,7 @@ xfs_trans_reserve(
 			goto undo_log;
 		}
 		tp->t_rtx_res += rtextents;
+		tp->t_rtx_res_orig = tp->t_rtx_res;
 	}
 
 	return 0;
@@ -993,6 +998,39 @@ xfs_trans_cancel(
 
 	xfs_trans_free_items(tp, dirty);
 	xfs_trans_free(tp);
+}
+
+/*
+ * Renew the block and RT extent reservations from the free space pool.
+ * The consumed counts were carried forward by xfs_trans_dup() so we know
+ * exactly how many blocks need to be reserved to restore the original
+ * reservation.
+ */
+int
+xfs_trans_regrant_blkres(
+	struct xfs_trans	*tp)
+{
+	int			error;
+
+	if (!(tp->t_flags & XFS_TRANS_RENEW_BLKRES))
+		return 0;
+
+	if (tp->t_blk_res != tp->t_blk_res_orig) {
+		error = xfs_dec_fdblocks(tp->t_mountp,
+				tp->t_blk_res_orig - tp->t_blk_res,
+				tp->t_flags & XFS_TRANS_RESERVE);
+		if (error)
+			return error;
+		tp->t_blk_res = tp->t_blk_res_orig;
+	}
+	if (tp->t_rtx_res != tp->t_rtx_res_orig) {
+		error = xfs_dec_frextents(tp->t_mountp,
+				tp->t_rtx_res_orig - tp->t_rtx_res);
+		if (error)
+			return error;
+		tp->t_rtx_res = tp->t_rtx_res_orig;
+	}
+	return 0;
 }
 
 /*
