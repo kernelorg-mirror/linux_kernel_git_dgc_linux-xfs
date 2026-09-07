@@ -2155,15 +2155,19 @@ xlog_recover_init_new_trans(
 				sizeof(struct xfs_trans_header) - len;
 	}
 
-	/*
-	 * Add an item to the transaction once the header is complete: for an
-	 * unsplit header that is this initial fragment (len == full header),
-	 * and for a split header it is the continuation fragment that finishes
-	 * it.
-	 */
-	if (cont || len == sizeof(struct xfs_trans_header))
-		xlog_recover_add_item(&trans->r_itemq);
 	memcpy(ptr, dp, len);
+
+	/*
+	 * The header is complete once the full struct has been assembled: for
+	 * an unsplit header that is this initial fragment (len == full header),
+	 * and for a split header it is the continuation fragment that finishes
+	 * it. Mark it decoded and add the item that subsequent log item regions
+	 * will be decoded into.
+	 */
+	if (cont || len == sizeof(struct xfs_trans_header)) {
+		trans->r_hdr_decoded = true;
+		xlog_recover_add_item(&trans->r_itemq);
+	}
 	return 0;
 }
 
@@ -2319,14 +2323,14 @@ xlog_recovery_process_trans(
 		flags &= ~XLOG_CONTINUE_TRANS;
 
 	/*
-	 * An empty item queue means we are still decoding the transaction
-	 * header at the start of the transaction rather than a log item. The
-	 * header can arrive whole (flags == 0), as an initial fragment
-	 * (XLOG_CONTINUE_TRANS) or as a continuation fragment
+	 * Until the transaction header has been fully decoded we are still
+	 * assembling it at the start of the transaction rather than decoding a
+	 * log item. The header can arrive whole (flags == 0), as an initial
+	 * fragment (XLOG_CONTINUE_TRANS) or as a continuation fragment
 	 * (XLOG_WAS_CONT_TRANS); XLOG_WAS_CONT_TRANS distinguishes the
 	 * continuation.
 	 */
-	if (list_empty(&trans->r_itemq) &&
+	if (!trans->r_hdr_decoded &&
 	    (!flags || (flags & (XLOG_CONTINUE_TRANS | XLOG_WAS_CONT_TRANS)))) {
 		error = xlog_recover_init_new_trans(log, trans, dp, len,
 					flags & XLOG_WAS_CONT_TRANS);
