@@ -2108,6 +2108,65 @@ xlog_recover_add_item(
 	list_add_tail(&item->ri_list, head);
 }
 
+/*
+ * Decode the transaction header at the start of a new transaction.
+ *
+ * The transaction header is not a log item. It can be arbitrarily split across
+ * op records, so it may arrive whole in a single op record, or as an initial
+ * fragment (cont == false) followed by one or more continuation fragments
+ * (cont == true). Reassemble it directly into r_theader where the rest of
+ * recovery expects to find it.
+ */
+STATIC int
+xlog_recover_init_new_trans(
+	struct xlog		*log,
+	struct xlog_recover	*trans,
+	char			*dp,
+	int			len,
+	bool			cont)
+{
+	char			*ptr;
+
+	/*
+	 * All regions are 32 bit aligned, so the smallest valid fragment is 4
+	 * bytes; that is also the minimum needed to read the magic number. A
+	 * fragment larger than the whole header is corruption in either case.
+	 */
+	if (len < 4 || len > sizeof(struct xfs_trans_header)) {
+		xfs_warn(log->l_mp, "%s: bad header length %d", __func__, len);
+		return -EFSCORRUPTED;
+	}
+
+	if (!cont) {
+		/*
+		 * Initial fragment. The magic number is at the start of the
+		 * header, which lands at the start of r_theader.
+		 */
+		if (*(uint *)dp != XFS_TRANS_HEADER_MAGIC) {
+			xfs_warn(log->l_mp,
+			"%s: bad header magic number 0x%x, expected 0x%x",
+				__func__, *(uint *)dp, XFS_TRANS_HEADER_MAGIC);
+			return -EFSCORRUPTED;
+		}
+		ptr = (char *)&trans->r_theader;
+	} else {
+		/* continuation fragment completes the tail of the header */
+		ptr = (char *)&trans->r_theader +
+				sizeof(struct xfs_trans_header) - len;
+	}
+
+	/*
+	 * Add an item to the transaction once the header is complete: for an
+	 * unsplit header that is this initial fragment (len == full header),
+	 * and for a split header it is the continuation fragment that finishes
+	 * it.
+	 */
+	if (cont || len == sizeof(struct xfs_trans_header))
+		xlog_recover_add_item(&trans->r_itemq);
+	memcpy(ptr, dp, len);
+	return 0;
+}
+
 STATIC int
 xlog_recover_add_to_cont_trans(
 	struct xlog		*log,
@@ -2118,24 +2177,6 @@ xlog_recover_add_to_cont_trans(
 	struct xlog_recover_item *item;
 	char			*ptr, *old_ptr;
 	int			old_len;
-
-	/*
-	 * If the transaction is empty, the header was split across this and the
-	 * previous record. Copy the rest of the header.
-	 */
-	if (list_empty(&trans->r_itemq)) {
-		ASSERT(len <= sizeof(struct xfs_trans_header));
-		if (len > sizeof(struct xfs_trans_header)) {
-			xfs_warn(log->l_mp, "%s: bad header length", __func__);
-			return -EFSCORRUPTED;
-		}
-
-		xlog_recover_add_item(&trans->r_itemq);
-		ptr = (char *)&trans->r_theader +
-				sizeof(struct xfs_trans_header) - len;
-		memcpy(ptr, dp, len);
-		return 0;
-	}
 
 	/* take the tail entry */
 	item = list_entry(trans->r_itemq.prev, struct xlog_recover_item,
@@ -2180,31 +2221,6 @@ xlog_recover_add_to_trans(
 
 	if (!len)
 		return 0;
-	if (list_empty(&trans->r_itemq)) {
-		/* we need to catch log corruptions here */
-		if (*(uint *)dp != XFS_TRANS_HEADER_MAGIC) {
-			xfs_warn(log->l_mp, "%s: bad header magic number",
-				__func__);
-			ASSERT(0);
-			return -EFSCORRUPTED;
-		}
-
-		if (len > sizeof(struct xfs_trans_header)) {
-			xfs_warn(log->l_mp, "%s: bad header length", __func__);
-			ASSERT(0);
-			return -EFSCORRUPTED;
-		}
-
-		/*
-		 * The transaction header can be arbitrarily split across op
-		 * records. If we don't have the whole thing here, copy what we
-		 * do have and handle the rest in the next record.
-		 */
-		if (len == sizeof(struct xfs_trans_header))
-			xlog_recover_add_item(&trans->r_itemq);
-		memcpy(&trans->r_theader, dp, len);
-		return 0;
-	}
 
 	ptr = xlog_kvmalloc(len);
 	memcpy(ptr, dp, len);
@@ -2303,6 +2319,21 @@ xlog_recovery_process_trans(
 		flags &= ~XLOG_CONTINUE_TRANS;
 
 	/*
+	 * An empty item queue means we are still decoding the transaction
+	 * header at the start of the transaction rather than a log item. The
+	 * header can arrive whole (flags == 0), as an initial fragment
+	 * (XLOG_CONTINUE_TRANS) or as a continuation fragment
+	 * (XLOG_WAS_CONT_TRANS); XLOG_WAS_CONT_TRANS distinguishes the
+	 * continuation.
+	 */
+	if (list_empty(&trans->r_itemq) &&
+	    (!flags || (flags & (XLOG_CONTINUE_TRANS | XLOG_WAS_CONT_TRANS)))) {
+		error = xlog_recover_init_new_trans(log, trans, dp, len,
+					flags & XLOG_WAS_CONT_TRANS);
+		goto out_error;
+	}
+
+	/*
 	 * Callees must not free the trans structure. We'll decide if we need to
 	 * free it or not based on the operation being done and it's result.
 	 */
@@ -2335,6 +2366,8 @@ xlog_recovery_process_trans(
 		error = -EFSCORRUPTED;
 		break;
 	}
+
+out_error:
 	if (error || freeit)
 		xlog_recover_free_trans(trans);
 	return error;
