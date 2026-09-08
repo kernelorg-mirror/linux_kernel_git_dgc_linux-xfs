@@ -1829,12 +1829,12 @@ static const struct xlog_recover_item_ops *xlog_recover_item_ops[] = {
 
 static const struct xlog_recover_item_ops *
 xlog_find_item_ops(
-	struct xlog_recover_item		*item)
+	uint16_t				item_type)
 {
 	unsigned int				i;
 
 	for (i = 0; i < ARRAY_SIZE(xlog_recover_item_ops); i++)
-		if (ITEM_TYPE(item) == xlog_recover_item_ops[i]->item_type)
+		if (xlog_recover_item_ops[i]->item_type == item_type)
 			return xlog_recover_item_ops[i];
 
 	return NULL;
@@ -1912,15 +1912,6 @@ xlog_recover_reorder_trans(
 			xfs_warn(log->l_mp,
 				"%s: committed log item has no regions",
 				__func__);
-			error = -EFSCORRUPTED;
-			break;
-		}
-
-		item->ri_ops = xlog_find_item_ops(item);
-		if (!item->ri_ops) {
-			xfs_warn(log->l_mp,
-				"%s: unrecognized type of log operation (%d)",
-				__func__, ITEM_TYPE(item));
 			error = -EFSCORRUPTED;
 			break;
 		}
@@ -2097,37 +2088,171 @@ out:
 	return error;
 }
 
+/*
+ * Generic region count validation for item types that do not supply their own
+ * ->validate_nregions() method. Any non-zero count up to the maximum an item
+ * can hold is accepted, and the count is used as-is.
+ */
+static int
+xlog_recover_nregions(
+	struct xlog		*log,
+	uint16_t		nregions)
+{
+	if (nregions == 0 || nregions > XLOG_MAX_REGIONS_IN_ITEM) {
+		xfs_warn(log->l_mp,
+	"bad number of regions (%d) in inode log format", nregions);
+		return -EFSCORRUPTED;
+	}
+	return nregions;
+}
+
+/*
+ * Start decoding a new log item. The item type and region count come from the
+ * type/size fields at the front of the item's first region. Look up the item
+ * ops from the type, validate the region count, then allocate and initialise
+ * the item.
+ *
+ * Returns the new item, which becomes the item currently being rebuilt, or an
+ * ERR_PTR() if the type is unknown or the region count is invalid. The item is
+ * not placed on the transaction's item queue until it has been fully decoded
+ * (see xlog_recover_complete_item()).
+ */
 STATIC struct xlog_recover_item *
 xlog_recover_add_item(
-	struct xlog_recover	*trans)
+	struct xlog		*log,
+	struct xlog_recover	*trans,
+	uint16_t		item_type,
+	uint16_t		nregions)
 {
+	const struct xlog_recover_item_ops *ops;
 	struct xlog_recover_item *item;
+	int			valid_nregions;
+
+	ops = xlog_find_item_ops(item_type);
+	if (!ops) {
+		xfs_warn(log->l_mp,
+			"%s: unrecognized type of log operation (0x%x)",
+			__func__, item_type);
+		return ERR_PTR(-EFSCORRUPTED);
+	}
+
+	/*
+	 * Validate the region count and determine how many regions to assemble
+	 * for the item. The type may override the raw count (e.g. the
+	 * transaction header always has a single region).
+	 */
+	if (ops->validate_nregions)
+		valid_nregions = ops->validate_nregions(log, nregions);
+	else
+		valid_nregions = xlog_recover_nregions(log, nregions);
+	if (valid_nregions < 0)
+		return ERR_PTR(valid_nregions);
 
 	item = kzalloc_obj(struct xlog_recover_item, GFP_KERNEL | __GFP_NOFAIL);
 	INIT_LIST_HEAD(&item->ri_list);
+	item->ri_ops = ops;
+	item->ri_total = valid_nregions;
+	item->ri_buf = kzalloc_objs(*item->ri_buf, item->ri_total,
+				    GFP_KERNEL | __GFP_NOFAIL);
 
-	/*
-	 * The item is not placed on the transaction's item queue until it has
-	 * been fully decoded (see xlog_recover_complete_item()). Until then it
-	 * is tracked as the item currently being rebuilt.
-	 */
 	trans->r_cur_item = item;
 	return item;
 }
 
 /*
- * A log item has been fully decoded from the journal. Move it onto the
- * transaction's item queue and clear the current item so the next region
- * decoded starts a new item.
+ * Free up any resources allocated by the transaction
+ *
+ * Remember that EFIs, EFDs, and IUNLINKs are handled later.
  */
 static void
+xlog_recover_free_item(
+	struct xlog_recover_item *item)
+{
+	int			i;
+
+	/* Free the regions in the item. */
+	for (i = 0; i < item->ri_cnt; i++)
+		kvfree(item->ri_buf[i].iov_base);
+	/* Free the item itself */
+	kfree(item->ri_buf);
+	kfree(item);
+}
+
+/*
+ * A log item has been fully decoded from the journal. Validate the assembled
+ * item, then move it onto the transaction's item queue and clear the current
+ * item so the next region decoded starts a new item.
+ *
+ * A type may instead consume the item during decode via its ->complete()
+ * method, in which case it is freed here rather than queued for replay.
+ */
+static int
 xlog_recover_complete_item(
+	struct xlog		*log,
 	struct xlog_recover	*trans)
 {
 	struct xlog_recover_item *item = trans->r_cur_item;
+	int			error;
+
+	if (item->ri_ops->validate_item) {
+		error = item->ri_ops->validate_item(log, item);
+		if (error)
+			return error;
+	}
+
+	if (item->ri_ops->complete) {
+		error = item->ri_ops->complete(log, trans, item);
+		if (error < 0)
+			return error;
+		if (error == XLOG_RECOVER_ITEM_CONSUMED) {
+			xlog_recover_free_item(item);
+			trans->r_cur_item = NULL;
+			return 0;
+		}
+	}
 
 	list_add_tail(&item->ri_list, &trans->r_itemq);
 	trans->r_cur_item = NULL;
+	return 0;
+}
+
+/*
+ * A region of the current item has been fully assembled from the journal.
+ * Validate it, and if it is the last region of the item complete the item.
+ * Called only when the region is complete (not a partial continuation).
+ */
+static int
+xlog_recover_complete_region(
+	struct xlog		*log,
+	struct xlog_recover	*trans)
+{
+	struct xlog_recover_item *item = trans->r_cur_item;
+	int			error;
+
+	/*
+	 * The format header (region 0) must be at least the minimum size for
+	 * the item type. This is checked here, once the region is complete, so
+	 * a partial first fragment is not rejected while still being assembled.
+	 */
+	if (item->ri_cnt == 1 && item->ri_ops->min_hdr_len &&
+	    item->ri_buf[0].iov_len < item->ri_ops->min_hdr_len) {
+		xfs_warn(log->l_mp,
+	"log item type 0x%x header too short (%zu < %u)",
+			item->ri_ops->item_type, item->ri_buf[0].iov_len,
+			item->ri_ops->min_hdr_len);
+		return -EFSCORRUPTED;
+	}
+
+	if (item->ri_ops->validate_region) {
+		error = item->ri_ops->validate_region(log, item,
+						      item->ri_cnt - 1);
+		if (error)
+			return error;
+	}
+
+	if (item->ri_cnt == item->ri_total)
+		return xlog_recover_complete_item(log, trans);
+	return 0;
 }
 
 /*
@@ -2216,11 +2341,10 @@ xlog_recover_add_to_cont_trans(
 
 	/*
 	 * The continued region is only complete once its final fragment has
-	 * been appended. When that finishes the item's last region, the item is
-	 * complete.
+	 * been appended; until then it cannot be validated.
 	 */
-	if (region_complete && item->ri_cnt == item->ri_total)
-		xlog_recover_complete_item(trans);
+	if (region_complete)
+		return xlog_recover_complete_region(log, trans);
 	return 0;
 }
 
@@ -2247,6 +2371,7 @@ xlog_recover_add_to_trans(
 {
 	struct xlog_recover_item *item;
 	char			*ptr;
+	int			error;
 
 	if (!len)
 		return 0;
@@ -2256,37 +2381,32 @@ xlog_recover_add_to_trans(
 
 	/*
 	 * If there is no item currently being rebuilt, this region is the first
-	 * region of a new item. Start the item and use its first region to
-	 * determine how many regions it has.
+	 * region of a new item. The type and region count are at the front of
+	 * the region; start the item from them. ptr is still standalone here,
+	 * so on error it just needs to be freed (out_free). Per-region size
+	 * validation (including min_hdr_len) happens once the region is
+	 * complete, below, because this first region may only be a partial
+	 * fragment here.
 	 */
 	item = trans->r_cur_item;
 	if (!item) {
 		struct xfs_inode_log_format *in_f = /* any will do */
 			(struct xfs_inode_log_format *)ptr;
 
-		if (in_f->ilf_size == 0 ||
-		    in_f->ilf_size > XLOG_MAX_REGIONS_IN_ITEM) {
-			xfs_warn(log->l_mp,
-		"bad number of regions (%d) in inode log format",
-				  in_f->ilf_size);
-			ASSERT(0);
-			kvfree(ptr);
-			return -EFSCORRUPTED;
+		item = xlog_recover_add_item(log, trans, in_f->ilf_type,
+					     in_f->ilf_size);
+		if (IS_ERR(item)) {
+			error = PTR_ERR(item);
+			goto out_free;
 		}
-
-		item = xlog_recover_add_item(trans);
-		item->ri_total = in_f->ilf_size;
-		item->ri_buf = kzalloc_objs(*item->ri_buf, item->ri_total,
-					    GFP_KERNEL | __GFP_NOFAIL);
 	}
 
-	if (item->ri_total <= item->ri_cnt) {
+	if (item->ri_cnt >= item->ri_total) {
 		xfs_warn(log->l_mp,
 	"log item region count (%d) overflowed size (%d)",
 				item->ri_cnt, item->ri_total);
-		ASSERT(0);
-		kvfree(ptr);
-		return -EFSCORRUPTED;
+		error = -EFSCORRUPTED;
+		goto out_free;
 	}
 
 	/* Description region is ri_buf[0] */
@@ -2296,32 +2416,18 @@ xlog_recover_add_to_trans(
 	trace_xfs_log_recover_item_add(log, trans, item, 0);
 
 	/*
-	 * The item is complete once its final region has been fully decoded. If
-	 * this region continues into the next op record it is not complete yet,
-	 * so the item cannot be either.
+	 * A region that continues into the next op record is not yet complete
+	 * and cannot be validated until the continuation finishes assembling
+	 * it. ptr is now owned by the item, so the transaction teardown frees
+	 * it on any error from here.
 	 */
-	if (region_complete && item->ri_cnt == item->ri_total)
-		xlog_recover_complete_item(trans);
+	if (region_complete)
+		return xlog_recover_complete_region(log, trans);
 	return 0;
-}
 
-/*
- * Free up any resources allocated by the transaction
- *
- * Remember that EFIs, EFDs, and IUNLINKs are handled later.
- */
-static void
-xlog_recover_free_item(
-	struct xlog_recover_item *item)
-{
-	int			i;
-
-	/* Free the regions in the item. */
-	for (i = 0; i < item->ri_cnt; i++)
-		kvfree(item->ri_buf[i].iov_base);
-	/* Free the item itself */
-	kfree(item->ri_buf);
-	kfree(item);
+out_free:
+	kvfree(ptr);
+	return error;
 }
 
 STATIC void
