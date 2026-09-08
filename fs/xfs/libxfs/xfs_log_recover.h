@@ -168,7 +168,6 @@ struct xlog_recover {
 	int			r_state;	/* not needed */
 	xfs_lsn_t		r_lsn;		/* xact lsn */
 	struct list_head	r_itemq;	/* q for items */
-	bool			r_hdr_decoded;	/* trans header fully decoded */
 	struct xlog_recover_item *r_cur_item;	/* item currently being rebuilt */
 };
 
