@@ -42,6 +42,8 @@ xlog_clear_stale_blocks(
 STATIC int
 xlog_do_recovery_pass(
         struct xlog *, xfs_daddr_t, xfs_daddr_t, int, xfs_daddr_t *);
+STATIC struct xlog_op_header *
+xlog_recover_validate_ophdr(struct xlog *log, char *dp, char *end);
 
 /*
  * Sector aligned buffer routines for buffer create/read/write/access
@@ -1169,8 +1171,11 @@ xlog_check_unmount_rec(
 		if (error)
 			return error;
 
-		op_head = (struct xlog_op_header *)offset;
-		if (op_head->oh_flags & XLOG_UNMOUNT_TRANS) {
+		op_head = xlog_recover_validate_ophdr(log, offset,
+				offset + BBSIZE);
+		if (IS_ERR(op_head))
+			return PTR_ERR(op_head);
+		if (op_head->oh_flags == XLOG_UNMOUNT_TRANS) {
 			/*
 			 * Set tail and last sync so that newly written log
 			 * records will point recovery to after the current
@@ -2637,6 +2642,50 @@ xlog_recover_ophdr_to_trans(
 }
 
 /*
+ * Validate an unmount record. The unmount record is the only record written by
+ * the log itself rather than by a transaction, and the log item processing loop
+ * skips it, so it can only be validated here. It is a single fixed size region,
+ * written by the log with the XFS_LOG clientid, containing an unmount format
+ * structure with a known magic number and zeroed padding.
+ *
+ * The ophdr has already been validated, so oh_len is known to be within the
+ * record and the unmount format region can be read directly.
+ */
+STATIC int
+xlog_recover_validate_unmount_record(
+	struct xlog			*log,
+	struct xlog_op_header		*ohead)
+{
+	struct xfs_unmount_log_format	*ulf = (struct xfs_unmount_log_format *)
+						(ohead + 1);
+
+	if (ohead->oh_clientid != XFS_LOG) {
+		xfs_warn(log->l_mp, "%s: bad unmount clientid 0x%x",
+			__func__, ohead->oh_clientid);
+		return -EFSCORRUPTED;
+	}
+
+	if (be32_to_cpu(ohead->oh_len) != sizeof(*ulf)) {
+		xfs_warn(log->l_mp, "%s: bad unmount record length 0x%x",
+			__func__, be32_to_cpu(ohead->oh_len));
+		return -EFSCORRUPTED;
+	}
+
+	if (ulf->magic != XLOG_UNMOUNT_TYPE) {
+		xfs_warn(log->l_mp, "%s: bad unmount magic 0x%x, expected 0x%x",
+			__func__, ulf->magic, XLOG_UNMOUNT_TYPE);
+		return -EFSCORRUPTED;
+	}
+
+	if (ulf->pad1 != 0 || ulf->pad2 != 0) {
+		xfs_warn(log->l_mp, "%s: bad unmount padding", __func__);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
+/*
  * Decode and validate an operation header from the journal. dp points at the
  * ophdr within the log record and end is the end of the record data. The ophdr
  * and its data region come straight from the on-disk log and cannot be trusted,
@@ -2653,6 +2702,7 @@ xlog_recover_validate_ophdr(
 {
 	struct xlog_op_header	*ohead;
 	unsigned int		len;
+	int			error;
 
 	/*
 	 * All log regions are 32 bit aligned, so the ophdr must be too. A
@@ -2736,11 +2786,15 @@ xlog_recover_validate_ophdr(
 			return ERR_PTR(-EFSCORRUPTED);
 		}
 		break;
+	case XLOG_UNMOUNT_TRANS:
+		error = xlog_recover_validate_unmount_record(log, ohead);
+		if (error)
+			return ERR_PTR(error);
+		break;
 	case 0:
 	case XLOG_CONTINUE_TRANS:
 	case XLOG_WAS_CONT_TRANS | XLOG_CONTINUE_TRANS:
 	case XLOG_WAS_CONT_TRANS | XLOG_END_TRANS:
-	case XLOG_UNMOUNT_TRANS:
 		break;
 	default:
 		xfs_warn(log->l_mp, "%s: bad flags 0x%x",
