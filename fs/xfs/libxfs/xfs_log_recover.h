@@ -171,6 +171,15 @@ struct xlog_recover {
 	struct xlog_recover_item *r_cur_item;	/* item currently being rebuilt */
 };
 
+/*
+ * The current recovery item can sometimes start with a zero length continuation
+ * op header. In this case there is nothing to decode, so the recovery item
+ * cannot be initialised yet. Leave this sentinel in r_cur_item instead so the
+ * continuation initialises the recovery item from the start of the continued
+ * region data.
+ */
+#define XLOG_RECOVER_CONT_ITEM	((struct xlog_recover_item *)1UL)
+
 #define ITEM_TYPE(i)	(*(unsigned short *)(i)->ri_buf[0].iov_base)
 
 #define	XLOG_RECOVER_CRCPASS	0
