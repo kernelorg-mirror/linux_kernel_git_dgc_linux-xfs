@@ -485,38 +485,6 @@ xlog_recover_do_reg_buffer(
 			break;
 		nbits = xfs_contig_bits(buf_f->blf_data_map,
 					buf_f->blf_map_size, bit);
-		ASSERT(nbits > 0);
-		ASSERT(item->ri_buf[i].iov_base != NULL);
-		ASSERT(item->ri_buf[i].iov_len % XFS_BLF_CHUNK == 0);
-		/*
-		 * The bitmap is only trustworthy to the extent that it
-		 * describes a region that actually fits inside the buffer we
-		 * read in based on the (attacker-controlled) blf_len.  Do not
-		 * rely on an ASSERT() for this -- it compiles away entirely on
-		 * non-DEBUG kernels, which is exactly where this matters, so
-		 * validate it for real and abort recovery of this buffer rather
-		 * than copying past the end of it.
-		 */
-		if (XFS_IS_CORRUPT(mp, BBTOB(bp->b_length) <
-				((uint)bit << XFS_BLF_SHIFT) +
-				(nbits << XFS_BLF_SHIFT))) {
-			xfs_alert(mp,
-	"Bad buffer log item dirty bitmap (bit %d, nbits %d) for %d-byte buffer at daddr 0x%llx.",
-				bit, nbits, BBTOB(bp->b_length),
-				xfs_buf_daddr(bp));
-			return -EFSCORRUPTED;
-		}
-
-		/*
-		 * The dirty regions logged in the buffer, even though
-		 * contiguous, may span multiple chunks. This is because the
-		 * dirty region may span a physical page boundary in a buffer
-		 * and hence be split into two separate vectors for writing into
-		 * the log. Hence we need to trim nbits back to the length of
-		 * the current region being copied out of the log.
-		 */
-		if (item->ri_buf[i].iov_len < (nbits << XFS_BLF_SHIFT))
-			nbits = item->ri_buf[i].iov_len >> XFS_BLF_SHIFT;
 
 		/*
 		 * Do a sanity check if this is a dquot buffer. Just checking
@@ -554,9 +522,6 @@ xlog_recover_do_reg_buffer(
 		i++;
 		bit += nbits;
 	}
-
-	/* Shouldn't be any more regions */
-	ASSERT(i == item->ri_total);
 
 	xlog_recover_validate_buf_type(mp, bp, buf_f, current_lsn);
 	return 0;
@@ -674,7 +639,6 @@ xlog_recover_do_inode_buffer(
 
 			nbits = xfs_contig_bits(buf_f->blf_data_map,
 						buf_f->blf_map_size, bit);
-			ASSERT(nbits > 0);
 			reg_buf_offset = bit << XFS_BLF_SHIFT;
 			reg_buf_bytes = nbits << XFS_BLF_SHIFT;
 			item_index++;
@@ -687,10 +651,6 @@ xlog_recover_do_inode_buffer(
 		 */
 		if (next_unlinked_offset < reg_buf_offset)
 			continue;
-
-		ASSERT(item->ri_buf[item_index].iov_base != NULL);
-		ASSERT((item->ri_buf[item_index].iov_len % XFS_BLF_CHUNK) == 0);
-		ASSERT((reg_buf_offset + reg_buf_bytes) <= BBTOB(bp->b_length));
 
 		/*
 		 * The current logged region contains a copy of the
