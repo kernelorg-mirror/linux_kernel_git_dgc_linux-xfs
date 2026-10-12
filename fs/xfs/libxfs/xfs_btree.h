@@ -345,6 +345,10 @@ xfs_btree_cur_sizeof(unsigned int nlevels)
 
 xfs_failaddr_t __xfs_btree_check_block(struct xfs_btree_cur *cur,
 		struct xfs_btree_block *block, int level, struct xfs_buf *bp);
+xfs_failaddr_t xfs_btree_check_fsblock_root_hdr(struct xfs_mount *mp,
+		uint32_t magic, unsigned int maxrecs,
+		struct xfs_btree_block *block, unsigned int minlevel,
+		unsigned int maxlevel);
 int __xfs_btree_check_ptr(struct xfs_btree_cur *cur,
 		const union xfs_btree_ptr *ptr, int index, int level);
 
