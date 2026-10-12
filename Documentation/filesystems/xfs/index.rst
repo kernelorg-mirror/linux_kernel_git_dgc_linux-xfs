@@ -9,6 +9,7 @@ XFS Filesystem Documentation
    :numbered:
 
    xfs-delayed-logging-design
+   xfs-log-recovery-validation-design
    xfs-maintainer-entry-profile
    xfs-self-describing-metadata
    xfs-online-fsck-design
