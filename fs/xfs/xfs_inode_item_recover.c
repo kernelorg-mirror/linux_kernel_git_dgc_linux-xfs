@@ -29,6 +29,7 @@
 #include "xfs_metafile.h"
 #include "xfs_bmap.h"
 #include "xfs_bmap_btree.h"
+#include "xfs_btree.h"
 #include "xfs_rtrmap_btree.h"
 #include "xfs_rtrefcount_btree.h"
 
@@ -470,6 +471,60 @@ xlog_dinode_verify_extents(
 }
 
 /*
+ * Verify a logged bmap btree root. The logged root is the expanded in-core
+ * block form, not the compact on-disk root, so it is a normal btree root block
+ * whose length is only as long as the fork region that holds it. The block
+ * length is fixed by the record count, so the region size fixes how many
+ * records the root can hold.
+ *
+ * The region size has already been bounds checked against the inode fork size,
+ * so it is known to fit within the fork and does not need rechecking here.
+ */
+static xfs_failaddr_t
+xlog_dinode_verify_bmbt_root(
+	struct xfs_mount		*mp,
+	struct xfs_log_dinode		*ldip,
+	int				whichfork,
+	void				*src,
+	unsigned int			size)
+{
+	struct xfs_btree_block		*block = src;
+	xfs_failaddr_t			fa;
+	uint32_t			magic;
+	unsigned int			numrecs;
+	unsigned int			i;
+
+	if (size < xfs_bmbt_block_len(mp))
+		return __this_address;
+
+	/* The root block is never a leaf, so it always has keys and pointers. */
+	magic = xfs_has_crc(mp) ? XFS_BMAP_CRC_MAGIC : XFS_BMAP_MAGIC;
+	fa = xfs_btree_check_fsblock_root_hdr(mp, magic,
+			xfs_bmbt_maxrecs(mp, size, false), block, 1,
+			mp->m_bm_maxlevels[whichfork]);
+	if (fa)
+		return fa;
+
+	/* The record count must be non-zero and exactly fill the region. */
+	numrecs = be16_to_cpu(block->bb_numrecs);
+	if (numrecs == 0 || size != xfs_bmap_broot_space_calc(mp, numrecs))
+		return __this_address;
+
+	for (i = 1; i <= numrecs; i++) {
+		struct xfs_bmbt_key	*key = xfs_bmbt_key_addr(mp, block, i);
+		xfs_bmbt_ptr_t		*ptr = xfs_bmap_broot_ptr_addr(mp, block,
+						i, size);
+
+		if (!xfs_verify_fileoff(be64_to_cpu(key->br_startoff)))
+			return __this_address;
+		if (!xfs_verify_fsbno(mp, be64_to_cpu(*ptr)))
+			return __this_address;
+	}
+
+	return NULL;
+}
+
+/*
  * Verify a logged shortform symlink target. The logged target is the on-disk
  * form, which is not null terminated, so this cannot use
  * xfs_symlink_shortform_verify().
@@ -567,6 +622,10 @@ xlog_dinode_verify_dfork(
 		return xlog_dinode_verify_extents(mp, ldip, XFS_DATA_FORK,
 				item->ri_buf[2].iov_base, ilfp->ilf_dsize);
 	case XFS_DINODE_FMT_BTREE:
+		if (field != XFS_ILOG_DBROOT)
+			return __this_address;
+		return xlog_dinode_verify_bmbt_root(mp, ldip, XFS_DATA_FORK,
+				item->ri_buf[2].iov_base, ilfp->ilf_dsize);
 	case XFS_DINODE_FMT_META_BTREE:
 		if (field != XFS_ILOG_DBROOT)
 			return __this_address;
@@ -628,7 +687,8 @@ xlog_dinode_verify_afork(
 	case XFS_DINODE_FMT_BTREE:
 		if (field != XFS_ILOG_ABROOT)
 			return __this_address;
-		break;
+		return xlog_dinode_verify_bmbt_root(mp, ldip, XFS_ATTR_FORK,
+				item->ri_buf[region].iov_base, ilfp->ilf_asize);
 	}
 
 	return NULL;
