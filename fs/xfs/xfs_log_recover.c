@@ -2638,6 +2638,38 @@ xlog_recover_ophdr_to_trans(
 	return NULL;
 }
 
+/*
+ * Validate an operation header decoded from the journal before it is used to
+ * drive transaction recovery. The ophdr and its data region come straight from
+ * the on-disk log and cannot be trusted, so check the fields for known values
+ * and obvious corruption here, in one place, before anything acts on them.
+ */
+STATIC int
+xlog_recover_validate_ophdr(
+	struct xlog		*log,
+	struct xlog_op_header	*ohead,
+	char			*dp,
+	char			*end)
+{
+	unsigned int		len = be32_to_cpu(ohead->oh_len);
+
+	/* Check the ophdr contains all the data it is supposed to contain. */
+	if (dp + len > end) {
+		xfs_warn(log->l_mp, "%s: bad length 0x%x", __func__, len);
+		return -EFSCORRUPTED;
+	}
+
+	/* Do we understand who wrote this op? */
+	if (ohead->oh_clientid != XFS_TRANSACTION &&
+	    ohead->oh_clientid != XFS_LOG) {
+		xfs_warn(log->l_mp, "%s: bad clientid 0x%x",
+			__func__, ohead->oh_clientid);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
 STATIC int
 xlog_recover_process_ophdr(
 	struct xlog		*log,
@@ -2650,27 +2682,12 @@ xlog_recover_process_ophdr(
 	struct list_head	*buffer_list)
 {
 	struct xlog_recover	*trans;
-	unsigned int		len;
+	unsigned int		len = be32_to_cpu(ohead->oh_len);
 	int			error;
 
-	/* Do we understand who wrote this op? */
-	if (ohead->oh_clientid != XFS_TRANSACTION &&
-	    ohead->oh_clientid != XFS_LOG) {
-		xfs_warn(log->l_mp, "%s: bad clientid 0x%x",
-			__func__, ohead->oh_clientid);
-		ASSERT(0);
-		return -EFSCORRUPTED;
-	}
-
-	/*
-	 * Check the ophdr contains all the data it is supposed to contain.
-	 */
-	len = be32_to_cpu(ohead->oh_len);
-	if (dp + len > end) {
-		xfs_warn(log->l_mp, "%s: bad length 0x%x", __func__, len);
-		WARN_ON(1);
-		return -EFSCORRUPTED;
-	}
+	error = xlog_recover_validate_ophdr(log, ohead, dp, end);
+	if (error)
+		return error;
 
 	trans = xlog_recover_ophdr_to_trans(rhash, rhead, ohead);
 	if (!trans) {
