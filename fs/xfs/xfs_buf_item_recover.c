@@ -212,7 +212,7 @@ xlog_recover_buf_commit_pass1(
  *	the first 32 bits of the buffer (most blocks),
  *	inside a struct xfs_da_blkinfo at the start of the buffer.
  */
-static void
+static int
 xlog_recover_validate_buf_type(
 	struct xfs_mount		*mp,
 	struct xfs_buf			*bp,
@@ -234,7 +234,7 @@ xlog_recover_validate_buf_type(
 	 * just avoid the verification stage for non-crc filesystems
 	 */
 	if (!xfs_has_crc(mp))
-		return;
+		return 0;
 
 	magic32 = be32_to_cpu(*(__be32 *)bp->b_addr);
 	magic16 = be16_to_cpu(*(__be16*)bp->b_addr);
@@ -424,14 +424,22 @@ xlog_recover_validate_buf_type(
 	/*
 	 * Nothing else to do in the case of a NULL current LSN as this means
 	 * the buffer is more recent than the change in the log and will be
-	 * skipped.
+	 * skipped. The buffer contents are newer than this format, so later
+	 * changes to this buffer still to be replayed may change its type. A
+	 * mismatch against this format is therefore expected and not a corruption.
 	 */
 	if (current_lsn == NULLCOMMITLSN)
-		return;
+		return 0;
 
+	/*
+	 * The buffer type does not match the magic number in the buffer we are
+	 * about to replay into. The write verifier keyed off the type would
+	 * reject it, so fail recovery rather than submit a buffer that cannot be
+	 * verified.
+	 */
 	if (warnmsg) {
 		xfs_warn(mp, warnmsg);
-		ASSERT(0);
+		return -EFSCORRUPTED;
 	}
 
 	/*
@@ -452,6 +460,8 @@ xlog_recover_validate_buf_type(
 		bip = bp->b_log_item;
 		bip->bli_item.li_lsn = current_lsn;
 	}
+
+	return 0;
 }
 
 /*
@@ -523,8 +533,7 @@ xlog_recover_do_reg_buffer(
 		bit += nbits;
 	}
 
-	xlog_recover_validate_buf_type(mp, bp, buf_f, current_lsn);
-	return 0;
+	return xlog_recover_validate_buf_type(mp, bp, buf_f, current_lsn);
 }
 
 /*
