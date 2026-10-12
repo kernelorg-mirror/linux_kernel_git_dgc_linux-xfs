@@ -855,18 +855,45 @@ xlog_recover_cud_commit_pass2(
 	struct xfs_cud_log_format	*cud_formatp;
 
 	cud_formatp = item->ri_buf[0].iov_base;
-	if (item->ri_buf[0].iov_len != sizeof(struct xfs_cud_log_format)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, log->l_mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
+	xlog_recover_release_intent(log, XFS_LI_CUI, cud_formatp->cud_cui_id);
+	return 0;
+}
+
+/*
+ * The cud is a single fixed size region. This is shared by the data and
+ * realtime cud items, which have identical formats.
+ */
+static int
+xlog_recover_cud_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	struct xfs_cud_log_format	*cud_formatp =
+		item->ri_buf[region_index].iov_base;
+
+	if (item->ri_buf[region_index].iov_len !=
+			sizeof(struct xfs_cud_log_format)) {
+		xfs_warn(log->l_mp, "CUD: bad item region length %zu recovered.",
+				item->ri_buf[region_index].iov_len);
 		return -EFSCORRUPTED;
 	}
 
-	xlog_recover_release_intent(log, XFS_LI_CUI, cud_formatp->cud_cui_id);
+	/* The padding is always written as zero. */
+	if (cud_formatp->__pad != 0) {
+		xfs_warn(log->l_mp, "CUD: bad padding 0x%x recovered.",
+				cud_formatp->__pad);
+		return -EFSCORRUPTED;
+	}
+
 	return 0;
 }
 
 const struct xlog_recover_item_ops xlog_cud_item_ops = {
 	.item_type		= XFS_LI_CUD,
+	.min_hdr_len		= sizeof(struct xfs_cud_log_format),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_cud_validate_region,
 	.commit_pass2		= xlog_recover_cud_commit_pass2,
 };
 
@@ -881,12 +908,6 @@ xlog_recover_rtcud_commit_pass2(
 	struct xfs_cud_log_format	*cud_formatp;
 
 	cud_formatp = item->ri_buf[0].iov_base;
-	if (item->ri_buf[0].iov_len != sizeof(struct xfs_cud_log_format)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, log->l_mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
-
 	xlog_recover_release_intent(log, XFS_LI_CUI_RT,
 			cud_formatp->cud_cui_id);
 	return 0;
@@ -897,5 +918,8 @@ xlog_recover_rtcud_commit_pass2(
 
 const struct xlog_recover_item_ops xlog_rtcud_item_ops = {
 	.item_type		= XFS_LI_CUD_RT,
+	.min_hdr_len		= sizeof(struct xfs_cud_log_format),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_cud_validate_region,
 	.commit_pass2		= xlog_recover_rtcud_commit_pass2,
 };
