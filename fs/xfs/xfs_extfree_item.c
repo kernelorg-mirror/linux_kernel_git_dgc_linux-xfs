@@ -219,6 +219,52 @@ xfs_efi_to_host_format(
 	}
 }
 
+/*
+ * Convert an on-disk EFD format buffer into the given host format structure.
+ * The buffer is in 32 bit or 64 bit on-disk form (which have different padding);
+ * a buffer already in host format does not need conversion and is not passed
+ * here. The buffer has already been validated as one of these two formats.
+ */
+STATIC void
+xfs_efd_to_host_format(
+	struct kvec			*buf,
+	struct xfs_efd_log_format	*dst_efd_fmt)
+{
+	struct xfs_efd_log_format	*src_efd_fmt = buf->iov_base;
+	struct xfs_efd_log_format_32	*src_efd_fmt_32;
+	struct xfs_efd_log_format_64	*src_efd_fmt_64;
+	uint				nextents = src_efd_fmt->efd_nextents;
+	uint				i;
+
+	if (buf->iov_len == xfs_efd_log_format32_sizeof(nextents)) {
+		src_efd_fmt_32 = buf->iov_base;
+		dst_efd_fmt->efd_type     = src_efd_fmt_32->efd_type;
+		dst_efd_fmt->efd_size     = src_efd_fmt_32->efd_size;
+		dst_efd_fmt->efd_nextents = src_efd_fmt_32->efd_nextents;
+		dst_efd_fmt->efd_efi_id   = src_efd_fmt_32->efd_efi_id;
+		for (i = 0; i < nextents; i++) {
+			dst_efd_fmt->efd_extents[i].ext_start =
+				src_efd_fmt_32->efd_extents[i].ext_start;
+			dst_efd_fmt->efd_extents[i].ext_len =
+				src_efd_fmt_32->efd_extents[i].ext_len;
+		}
+		return;
+	}
+
+	ASSERT(buf->iov_len == xfs_efd_log_format64_sizeof(nextents));
+	src_efd_fmt_64 = buf->iov_base;
+	dst_efd_fmt->efd_type     = src_efd_fmt_64->efd_type;
+	dst_efd_fmt->efd_size     = src_efd_fmt_64->efd_size;
+	dst_efd_fmt->efd_nextents = src_efd_fmt_64->efd_nextents;
+	dst_efd_fmt->efd_efi_id   = src_efd_fmt_64->efd_efi_id;
+	for (i = 0; i < nextents; i++) {
+		dst_efd_fmt->efd_extents[i].ext_start =
+			src_efd_fmt_64->efd_extents[i].ext_start;
+		dst_efd_fmt->efd_extents[i].ext_len =
+			src_efd_fmt_64->efd_extents[i].ext_len;
+	}
+}
+
 static inline struct xfs_efd_log_item *EFD_ITEM(struct xfs_log_item *lip)
 {
 	return container_of(lip, struct xfs_efd_log_item, efd_item);
@@ -1061,11 +1107,49 @@ xlog_recover_efd_validate_region(
 	return 0;
 }
 
+/*
+ * Convert the efd to host format and validate its contents, as for the efi.
+ * The efd extents mirror those of the efi it completes.
+ */
+static int
+xlog_recover_efd_validate_item(
+	struct xlog			*log,
+	struct xlog_recover_item	*item)
+{
+	struct xfs_efd_log_format	*efd_formatp = item->ri_buf[0].iov_base;
+	uint32_t			nextents = efd_formatp->efd_nextents;
+	size_t				host_len = xfs_efd_log_format_sizeof(nextents);
+	bool				isrt = ITEM_TYPE(item) == XFS_LI_EFD_RT;
+	uint32_t			i;
+
+	if (item->ri_buf[0].iov_len != host_len) {
+		efd_formatp = xlog_kvmalloc(host_len);
+		xfs_efd_to_host_format(&item->ri_buf[0], efd_formatp);
+		kvfree(item->ri_buf[0].iov_base);
+		item->ri_buf[0].iov_base = efd_formatp;
+		item->ri_buf[0].iov_len = host_len;
+	}
+
+	for (i = 0; i < nextents; i++) {
+		struct xfs_extent	*extp = &efd_formatp->efd_extents[i];
+
+		if (!xfs_efi_validate_ext(log->l_mp, isrt, extp)) {
+			xfs_warn(log->l_mp,
+	"EFD: bad extent %u (start 0x%llx, len 0x%x) recovered.",
+				i, extp->ext_start, extp->ext_len);
+			return -EFSCORRUPTED;
+		}
+	}
+
+	return 0;
+}
+
 const struct xlog_recover_item_ops xlog_efd_item_ops = {
 	.item_type		= XFS_LI_EFD,
 	.min_hdr_len		= sizeof(struct xfs_efd_log_format),
 	.validate_nregions	= xlog_recover_single_region,
 	.validate_region	= xlog_recover_efd_validate_region,
+	.validate_item		= xlog_recover_efd_validate_item,
 	.commit_pass2		= xlog_recover_efd_commit_pass2,
 };
 
@@ -1094,5 +1178,6 @@ const struct xlog_recover_item_ops xlog_rtefd_item_ops = {
 	.min_hdr_len		= sizeof(struct xfs_efd_log_format),
 	.validate_nregions	= xlog_recover_single_region,
 	.validate_region	= xlog_recover_efd_validate_region,
+	.validate_item		= xlog_recover_efd_validate_item,
 	.commit_pass2		= xlog_recover_rtefd_commit_pass2,
 };
