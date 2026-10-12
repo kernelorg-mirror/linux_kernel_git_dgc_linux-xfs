@@ -81,35 +81,42 @@ Transaction header as a validated type
 The transaction header (``struct xfs_trans_header``) is currently decoded
 inline in ``add_to_trans`` with bespoke magic number and length checks, and
 its continuation is handled separately in ``add_to_cont_trans``. Instead,
-treat it as a regular validated type within the same framework:
+treat it as a regular validated type within the same framework by giving it
+an ``xlog_recover_item_ops`` entry:
 
-- Add a pseudo item type (e.g. ``XFS_LI_TRANS_HDR`` or use the magic
-  number ``XFS_TRANS_HEADER_MAGIC`` as the type code) with its own
-  ``xlog_recover_item_ops`` entry.
-- ``min_regions = 1``, ``max_regions = 1``
 - ``min_hdr_len = sizeof(struct xfs_trans_header)``
+- ``validate_nregions`` always returns a region count of 1 (see the
+  endianness note below)
 - ``validate_region`` checks ``iov_len == sizeof(struct xfs_trans_header)``
   and the magic number
-- No ``commit_pass1``/``commit_pass2`` callbacks — after validation, the
-  decoded transaction header is copied to ``trans->r_theader`` as before
+- ``complete`` copies the decoded header to ``trans->r_theader`` and
+  returns ``XLOG_RECOVER_ITEM_CONSUMED`` so it is freed rather than queued
+  for replay — the header is not a log item and has no
+  ``commit_pass1``/``commit_pass2`` handler
 
-This eliminates the special-case parsing in ``add_to_trans`` and
-``add_to_cont_trans`` for the transaction header. The zero-length first
-fragment case is handled uniformly: it arrives as a continuation
-(``oh_len == 0``, ``XLOG_CONTINUE_TRANS`` set), and the continuation
-infrastructure assembles the complete region before ``validate_region``
-checks it.
+The header has no format header of the ``type/size`` shape: its first 32
+bits are ``th_magic``. When ``add_to_trans`` reads the first two 16 bit
+words as the type and region count, they land on the two halves of the
+magic. The type-half is used as the ops key, and ``validate_nregions``
+checks that the count-half holds the other half of the magic before
+returning 1 (the header always has a single region).
 
-The ``ilf_size`` field of the transaction header format is a bit different
-— ``xfs_trans_header`` uses ``th_num_items`` rather than the generic
-``ilf_size`` at offset 2. Since the transaction header always has exactly
-1 region, we don't need to read ``ilf_size`` from it. The
-``ops->min_regions == ops->max_regions == 1`` is sufficient.
+Because the XFS log is written in host byte order, which half of the magic
+is read as the type depends on the endianness of the host that wrote the
+log. Register two ops entries, one for each order (``item_type`` of
+``0x414e``/``0x5452``, with the complementary half checked by
+``validate_nregions``); on any given host only one is ever matched, and
+neither type code collides with an ``XFS_LI_*`` value.
 
-Alternatively, the transaction header could be handled without a full
-ops entry by having the generic code recognise it as a special case
-at step (b) and apply its fixed constraints directly. Either approach
-works; the ops entry is cleaner but the special case is simpler.
+Routing the header through the generic assembly removes the special-case
+parsing in ``add_to_trans`` and ``add_to_cont_trans``, and lets
+``xlog_recover_init_new_trans()``, the ``r_hdr_decoded`` flag and the
+header dispatch branch in ``xlog_recovery_process_trans()`` be deleted — a
+header op record now falls through to the generic region assembly like any
+other. The zero-length first fragment case is handled uniformly: it arrives
+as a continuation (``oh_len == 0``, ``XLOG_CONTINUE_TRANS`` set), and the
+continuation infrastructure assembles the complete region before
+``validate_region`` checks it.
 
 New members in ``struct xlog_recover_item_ops``::
 
@@ -414,19 +421,20 @@ Patch 1: Add validation infrastructure to the ops struct
       unknown-type rejection moving earlier
 
 Patch 2: Treat the transaction header as a validated region type
-    - Add an ops entry for the transaction header keyed on the low 16 bits
-      of ``XFS_TRANS_HEADER_MAGIC``, with ``min_regions = 1``,
-      ``max_regions = 1``, ``min_hdr_len = sizeof(struct xfs_trans_header)``
-      and a ``validate_region`` that checks ``iov_len`` and the magic
-      number
+    - Add two ops entries for the transaction header, keyed on the two
+      halves of ``XFS_TRANS_HEADER_MAGIC`` (one per host byte order), each
+      with ``min_hdr_len = sizeof(struct xfs_trans_header)``, a
+      ``validate_nregions`` that checks the other half of the magic and
+      returns 1, a ``validate_region`` that checks ``iov_len`` and the magic
+      number, and a ``complete`` that copies the header to
+      ``trans->r_theader`` and returns ``XLOG_RECOVER_ITEM_CONSUMED``
     - Remove the bespoke transaction header parsing from ``add_to_trans``
       and ``add_to_cont_trans``; route through the generic region assembly
-    - Handle the zero-length first fragment case (``len == 0`` with empty
-      ``r_itemq``) by deferring to the continuation path
-    - Add the ``validate_region`` call site(s) needed for the transaction
-      header (generic call sites for all other types are wired in Patch 7)
-    - After validation, copy the decoded header to ``trans->r_theader``
-      as before
+    - Delete ``xlog_recover_init_new_trans()``, the ``r_hdr_decoded`` flag
+      and the header dispatch branch in ``xlog_recovery_process_trans()``
+    - The zero-length first fragment case is handled by the continuation
+      path (see the note below on ``add_to_cont_trans`` needing a
+      ``r_cur_item != NULL`` guard, added in Patch 5)
 
 Patch 3: Move item ops lookup to add_to_trans (first region decode)
     - Look up and store ``ri_ops`` when ``ri_total == 0``
@@ -444,7 +452,14 @@ Patch 4: Populate validate_nregions/min_hdr_len for all item types
       time from Patch 1
 
 Patch 5: Fix generic safety issues
-    - ``add_to_cont_trans``: check ``ri_cnt > 0`` and ``ri_buf != NULL``
+    - ``add_to_cont_trans``: check there is an item under assembly
+      (``trans->r_cur_item != NULL``) before dereferencing it. A corrupt
+      log whose first op record is a continuation fragment
+      (``XLOG_WAS_CONT_TRANS`` with no preceding initial fragment) reaches
+      ``add_to_cont_trans`` with no current item; reject it rather than
+      dereferencing NULL. (Now that the transaction header is decoded as an
+      item in Patch 2, this also covers the header's leading-continuation
+      case, which the old ``xlog_recover_init_new_trans()`` handled itself.)
     - ``add_to_cont_trans``: bounds-check accumulated region size before
       ``kvrealloc``
     - ``process_data``: validate ``oh_len`` alignment
