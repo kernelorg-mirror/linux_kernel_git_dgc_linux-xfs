@@ -2353,7 +2353,8 @@ xlog_recover_complete_region(
 	struct xlog_recover	*trans)
 {
 	struct xlog_recover_item *item = trans->r_cur_item;
-	int			error;
+	int			region_to_dump = 0;
+	int			error = 0;
 
 	/*
 	 * The format header (region 0) must be at least the minimum size for
@@ -2366,19 +2367,29 @@ xlog_recover_complete_region(
 	"log item type 0x%x header too short (%zu < %u)",
 			item->ri_ops->item_type, item->ri_buf[0].iov_len,
 			item->ri_ops->min_hdr_len);
-		return -EFSCORRUPTED;
+		error = -EFSCORRUPTED;
+		goto out_error;
 	}
 
 	if (item->ri_ops->validate_region) {
 		error = item->ri_ops->validate_region(log, item,
 						      item->ri_cnt - 1);
-		if (error)
-			return error;
+		if (error) {
+			/* dump the bad region rather than the log format header */
+			region_to_dump = item->ri_cnt - 1;
+			goto out_error;
+		}
 	}
 
 	if (item->ri_cnt == item->ri_total)
-		return xlog_recover_complete_item(log, trans);
-	return 0;
+		error = xlog_recover_complete_item(log, trans);
+
+out_error:
+	if (error == -EFSCORRUPTED)
+		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, log->l_mp,
+				item->ri_buf[region_to_dump].iov_base,
+				item->ri_buf[region_to_dump].iov_len);
+	return error;
 }
 
 STATIC int
