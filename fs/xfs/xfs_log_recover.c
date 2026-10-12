@@ -2408,6 +2408,16 @@ xlog_recover_add_to_cont_trans(
 	old_ptr = item->ri_buf[item->ri_cnt-1].iov_base;
 	old_len = item->ri_buf[item->ri_cnt-1].iov_len;
 
+	/*
+	 * Bound the assembled region size before growing the buffer so a corrupt
+	 * continuation stream cannot drive an unbounded allocation.
+	 */
+	if (old_len + len > XLOG_MAX_REGION_SIZE) {
+		xfs_warn(log->l_mp, "%s: region too large (0x%x)",
+			__func__, old_len + len);
+		return -EFSCORRUPTED;
+	}
+
 	ptr = kvrealloc(old_ptr, len + old_len, GFP_KERNEL);
 	if (!ptr)
 		return -ENOMEM;
@@ -2781,15 +2791,8 @@ xlog_recover_validate_ophdr(
 		return ERR_PTR(-EFSCORRUPTED);
 	}
 
-	/*
-	 * A single region cannot be larger than the largest object we log in
-	 * one region. That is a whole buffer in a buffer log item (up to
-	 * XFS_MAX_BLOCKSIZE, e.g. a 64k directory block on a 4k block size
-	 * filesystem) or a remote attribute value (up to XFS_XATTR_SIZE_MAX,
-	 * logged in its own region); both are 64k.
-	 */
-	BUILD_BUG_ON(XFS_XATTR_SIZE_MAX > XFS_MAX_BLOCKSIZE);
-	if (len > XFS_MAX_BLOCKSIZE) {
+	/* A single region cannot be larger than the largest object we log. */
+	if (len > XLOG_MAX_REGION_SIZE) {
 		xfs_warn(log->l_mp, "%s: length 0x%x too large", __func__, len);
 		return ERR_PTR(-EFSCORRUPTED);
 	}
