@@ -1173,8 +1173,25 @@ cancelled:
 	return 0;
 }
 
+/*
+ * A buffer item is a format header region followed by a region for each dirty
+ * range of the buffer. However, a cancelled buffer only logs a format header,
+ * hence the valid region count range spans the entire range a log item can
+ * legally have.
+ */
+static int
+xlog_recover_buf_nregions(
+	struct xlog			*log,
+	uint16_t			nregions)
+{
+	if (nregions < 1 || nregions > XLOG_MAX_REGIONS_IN_ITEM)
+		return -EFSCORRUPTED;
+	return nregions;
+}
+
 const struct xlog_recover_item_ops xlog_buf_item_ops = {
 	.item_type		= XFS_LI_BUF,
+	.validate_nregions	= xlog_recover_buf_nregions,
 	.reorder		= xlog_recover_buf_reorder,
 	.ra_pass2		= xlog_recover_buf_ra_pass2,
 	.commit_pass1		= xlog_recover_buf_commit_pass1,
