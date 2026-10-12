@@ -1233,11 +1233,164 @@ xlog_recover_buf_validate_region(
 	return 0;
 }
 
+/* The buffer type flags. A buffer has at most one of these set. */
+#define XFS_BLF_TYPE_MASK \
+	(XFS_BLF_INODE_BUF | XFS_BLF_UDQUOT_BUF | XFS_BLF_PDQUOT_BUF | \
+	 XFS_BLF_GDQUOT_BUF)
+
+/*
+ * The buffer type is recorded both in the top bits of the format flags and in
+ * the type flags. Check the two agree: a buffer carries at most one type flag,
+ * and it must be the one the type field describes.
+ */
+static xfs_failaddr_t
+xlog_recover_buf_verify_type(
+	uint16_t			blft,
+	unsigned int			type)
+{
+	if (blft <= XFS_BLFT_UNKNOWN_BUF || blft >= XFS_BLFT_MAX_BUF)
+		return __this_address;
+
+	switch (blft) {
+	case XFS_BLFT_DINO_BUF:
+		if (type != XFS_BLF_INODE_BUF)
+			return __this_address;
+		break;
+	case XFS_BLFT_UDQUOT_BUF:
+		if (type != XFS_BLF_UDQUOT_BUF)
+			return __this_address;
+		break;
+	case XFS_BLFT_PDQUOT_BUF:
+		if (type != XFS_BLF_PDQUOT_BUF)
+			return __this_address;
+		break;
+	case XFS_BLFT_GDQUOT_BUF:
+		if (type != XFS_BLF_GDQUOT_BUF)
+			return __this_address;
+		break;
+	default:
+		if (type)
+			return __this_address;
+		break;
+	}
+
+	return NULL;
+}
+
+/*
+ * Validate the whole buffer item once all regions are assembled. The item size
+ * must match the number of regions attached. A cancelled buffer is not
+ * replayed, so it logs only the format header. Any other buffer must have a
+ * valid type, and its dirty regions must match the dirty bitmap and not
+ * describe more than a buffer's worth of data.
+ */
+static int
+xlog_recover_buf_validate_item(
+	struct xlog			*log,
+	struct xlog_recover_item	*item)
+{
+	struct xfs_buf_log_format	*blf = item->ri_buf[0].iov_base;
+	xfs_daddr_t			eofs = log->l_mp->m_ddev_targp->bt_nr_sectors;
+	xfs_failaddr_t			fa;
+	size_t				total = 0;
+	unsigned int			ri = 1;
+	int				first_bit;
+
+	if (blf->blf_size != item->ri_total) {
+		xfs_warn(log->l_mp,
+			"BUF: item size %u does not match region count %u recovered.",
+			blf->blf_size, item->ri_total);
+		return -EFSCORRUPTED;
+	}
+
+	/*
+	 * The buffer length is an invariant: a buffer cannot be larger than the
+	 * most data that can be logged in a single region.
+	 */
+	if (blf->blf_len == 0 || BBTOB(blf->blf_len) > XLOG_MAX_REGION_SIZE) {
+		xfs_warn(log->l_mp,
+			"BUF: bad buffer length %u recovered.", blf->blf_len);
+		return -EFSCORRUPTED;
+	}
+
+	/*
+	 * The buffer must lie wholly within the data device. Guard against the
+	 * end wrapping so an out of range buffer cannot pass the bounds check.
+	 */
+	if (blf->blf_blkno < 0 ||
+	    blf->blf_blkno >= eofs ||
+	    blf->blf_blkno + blf->blf_len < blf->blf_blkno ||
+	    blf->blf_blkno + blf->blf_len > eofs) {
+		xfs_warn(log->l_mp,
+			"BUF: bad buffer block 0x%llx length %u recovered.",
+			blf->blf_blkno, blf->blf_len);
+		return -EFSCORRUPTED;
+	}
+
+	/*
+	 * A cancelled buffer overrides everything else. It is not replayed, so
+	 * it logs only the format header regardless of what the dirty bitmap
+	 * holds, and nothing else needs to be checked.
+	 */
+	if (blf->blf_flags & XFS_BLF_CANCEL) {
+		if (blf->blf_size != 1) {
+			xfs_warn(log->l_mp,
+				"BUF: cancelled buffer has %u regions recovered.",
+				blf->blf_size);
+			return -EFSCORRUPTED;
+		}
+		return 0;
+	}
+
+	fa = xlog_recover_buf_verify_type(xfs_blft_from_flags(blf),
+			blf->blf_flags & XFS_BLF_TYPE_MASK);
+	if (fa) {
+		xfs_warn(log->l_mp,
+			"BUF: type %u and flags 0x%x disagree recovered at %pS",
+			xfs_blft_from_flags(blf), blf->blf_flags, fa);
+		return -EFSCORRUPTED;
+	}
+
+	/*
+	 * Each dirty region covers one contiguous run of set bits in the dirty
+	 * bitmap. Walk the bitmap and the regions together: each region size
+	 * must match the length of the run it covers, each run must lie within
+	 * the buffer, and the regions must exactly cover the bitmap. The dirty
+	 * data across all regions cannot be larger than the buffer itself.
+	 */
+	first_bit = xfs_next_bit(blf->blf_data_map, blf->blf_map_size, 0);
+	while (first_bit != -1) {
+		int	nbits = xfs_contig_bits(blf->blf_data_map,
+				blf->blf_map_size, first_bit);
+
+		if (ri >= item->ri_total ||
+		    item->ri_buf[ri].iov_len != (nbits << XFS_BLF_SHIFT) ||
+		    ((first_bit + nbits) << XFS_BLF_SHIFT) > BBTOB(blf->blf_len))
+			goto bad_map;
+
+		total += item->ri_buf[ri].iov_len;
+		ri++;
+		first_bit = xfs_next_bit(blf->blf_data_map, blf->blf_map_size,
+				first_bit + nbits + 1);
+	}
+
+	if (ri != item->ri_total || total > BBTOB(blf->blf_len))
+		goto bad_map;
+
+	return 0;
+
+bad_map:
+	xfs_warn(log->l_mp,
+		"BUF: dirty bitmap does not match regions recovered.");
+	return -EFSCORRUPTED;
+}
+
 const struct xlog_recover_item_ops xlog_buf_item_ops = {
 	.item_type		= XFS_LI_BUF,
 	.min_hdr_len		= offsetof(struct xfs_buf_log_format, blf_data_map),
 	.validate_nregions	= xlog_recover_buf_nregions,
 	.validate_region	= xlog_recover_buf_validate_region,
+	.validate_item		= xlog_recover_buf_validate_item,
 	.reorder		= xlog_recover_buf_reorder,
 	.ra_pass2		= xlog_recover_buf_ra_pass2,
 	.commit_pass1		= xlog_recover_buf_commit_pass1,
