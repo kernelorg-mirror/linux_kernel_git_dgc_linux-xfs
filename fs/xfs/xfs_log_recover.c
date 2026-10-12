@@ -2712,6 +2712,13 @@ xlog_recover_validate_ophdr(
 		return ERR_PTR(-EFSCORRUPTED);
 	}
 
+	/* The padding is always written as zero. */
+	if (ohead->oh_res2 != 0) {
+		xfs_warn(log->l_mp, "%s: bad padding 0x%x",
+			__func__, ohead->oh_res2);
+		return ERR_PTR(-EFSCORRUPTED);
+	}
+
 	return ohead;
 }
 
