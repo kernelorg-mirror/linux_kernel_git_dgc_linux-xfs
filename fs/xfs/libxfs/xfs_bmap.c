@@ -1090,12 +1090,12 @@ struct xfs_iread_state {
 
 int
 xfs_bmap_complain_bad_rec(
-	struct xfs_inode		*ip,
+	struct xfs_mount		*mp,
+	xfs_ino_t			ino,
 	int				whichfork,
 	xfs_failaddr_t			fa,
 	const struct xfs_bmbt_irec	*irec)
 {
-	struct xfs_mount		*mp = ip->i_mount;
 	const char			*forkname;
 
 	switch (whichfork) {
@@ -1107,7 +1107,7 @@ xfs_bmap_complain_bad_rec(
 
 	xfs_warn(mp,
  "Bmap BTree record corruption in inode 0x%llx %s fork detected at %pS!",
-				I_INO(ip), forkname, fa);
+				ino, forkname, fa);
 	xfs_warn(mp,
 		"Offset 0x%llx, start block 0x%llx, block count 0x%llx state 0x%x",
 		irec->br_startoff, irec->br_startblock, irec->br_blockcount,
@@ -1160,8 +1160,8 @@ xfs_iread_bmbt_block(
 					"xfs_iread_extents(2)", frp,
 					sizeof(*frp), fa);
 			xfs_bmap_mark_sick(ip, whichfork);
-			return xfs_bmap_complain_bad_rec(ip, whichfork, fa,
-					&new);
+			return xfs_bmap_complain_bad_rec(ip->i_mount,
+					I_INO(ip), whichfork, fa, &new);
 		}
 		xfs_iext_insert(ip, &ir->icur, &new,
 				xfs_bmap_fork_to_state(whichfork));
@@ -6136,6 +6136,39 @@ xfs_bmap_validate_extent(
 }
 
 /*
+ * Check a packed on-disk array of extent records. Returns the address of the
+ * first bad record, or NULL if they are all good. If ino is not NULLFSINO, a
+ * bad record is also reported against that inode.
+ */
+xfs_failaddr_t
+xfs_bmap_validate_extent_array(
+	struct xfs_mount	*mp,
+	xfs_ino_t		ino,
+	bool			rtfile,
+	int			whichfork,
+	struct xfs_bmbt_rec	*recs,
+	xfs_extnum_t		nrecs)
+{
+	xfs_extnum_t		i;
+
+	for (i = 0; i < nrecs; i++) {
+		struct xfs_bmbt_irec	irec;
+		xfs_failaddr_t		fa;
+
+		xfs_bmbt_disk_get_all(&recs[i], &irec);
+		fa = xfs_bmap_validate_extent_raw(mp, rtfile, whichfork, &irec);
+		if (fa) {
+			if (ino != NULLFSINO)
+				xfs_bmap_complain_bad_rec(mp, ino, whichfork,
+						fa, &irec);
+			return fa;
+		}
+	}
+
+	return NULL;
+}
+
+/*
  * Used in xfs_itruncate_extents().  This is the maximum number of extents
  * freed from a file in a single transaction.
  */
@@ -6196,8 +6229,9 @@ xfs_bmap_query_range_helper(
 			&irec);
 	if (fa) {
 		xfs_btree_mark_sick(cur);
-		return xfs_bmap_complain_bad_rec(cur->bc_ino.ip,
-				cur->bc_ino.whichfork, fa, &irec);
+		return xfs_bmap_complain_bad_rec(cur->bc_mp,
+				I_INO(cur->bc_ino.ip), cur->bc_ino.whichfork,
+				fa, &irec);
 	}
 
 	return query->fn(cur, &irec, query->priv);

@@ -138,23 +138,22 @@ xfs_iformat_extents(
 	ifp->if_data = NULL;
 	ifp->if_height = 0;
 	if (size) {
+		xfs_failaddr_t	fa;
+
 		dp = (xfs_bmbt_rec_t *) XFS_DFORK_PTR(dip, whichfork);
+
+		fa = xfs_bmap_validate_extent_array(mp, I_INO(ip),
+				XFS_IS_REALTIME_INODE(ip), whichfork, dp, nex);
+		if (fa) {
+			xfs_inode_verifier_error(ip, -EFSCORRUPTED,
+					"xfs_iformat_extents(2)", dp, size, fa);
+			xfs_inode_mark_sick(ip, XFS_SICK_INO_CORE);
+			return -EFSCORRUPTED;
+		}
 
 		xfs_iext_first(ifp, &icur);
 		for (i = 0; i < nex; i++, dp++) {
-			xfs_failaddr_t	fa;
-
 			xfs_bmbt_disk_get_all(dp, &new);
-			fa = xfs_bmap_validate_extent(ip, whichfork, &new);
-			if (fa) {
-				xfs_inode_verifier_error(ip, -EFSCORRUPTED,
-						"xfs_iformat_extents(2)",
-						dp, sizeof(*dp), fa);
-				xfs_inode_mark_sick(ip, XFS_SICK_INO_CORE);
-				return xfs_bmap_complain_bad_rec(ip, whichfork,
-						fa, &new);
-			}
-
 			xfs_iext_insert(ip, &icur, &new, state);
 			trace_xfs_read_extent(ip, &icur, state, _THIS_IP_);
 			xfs_iext_next(ifp, &icur);

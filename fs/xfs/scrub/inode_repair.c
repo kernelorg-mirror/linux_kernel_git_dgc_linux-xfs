@@ -869,11 +869,9 @@ xrep_dinode_bad_extents_fork(
 	unsigned int		dfork_size,
 	int			whichfork)
 {
-	struct xfs_bmbt_irec	new;
 	struct xfs_bmbt_rec	*dp;
 	xfs_extnum_t		nex;
 	bool			isrt;
-	unsigned int		i;
 
 	nex = xfs_dfork_nextents(dip, whichfork);
 	if (nex > dfork_size / sizeof(struct xfs_bmbt_rec))
@@ -882,15 +880,9 @@ xrep_dinode_bad_extents_fork(
 	dp = XFS_DFORK_PTR(dip, whichfork);
 
 	isrt = dip->di_flags & cpu_to_be16(XFS_DIFLAG_REALTIME);
-	for (i = 0; i < nex; i++, dp++) {
-		xfs_failaddr_t	fa;
-
-		xfs_bmbt_disk_get_all(dp, &new);
-		fa = xfs_bmap_validate_extent_raw(sc->mp, isrt, whichfork,
-				&new);
-		if (fa)
-			return true;
-	}
+	if (xfs_bmap_validate_extent_array(sc->mp, NULLFSINO, isrt, whichfork,
+			dp, nex))
+		return true;
 
 	return false;
 }

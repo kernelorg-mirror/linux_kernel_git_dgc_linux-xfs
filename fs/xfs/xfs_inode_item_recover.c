@@ -27,6 +27,7 @@
 #include "xfs_dir2_priv.h"
 #include "xfs_attr_leaf.h"
 #include "xfs_metafile.h"
+#include "xfs_bmap.h"
 #include "xfs_bmap_btree.h"
 #include "xfs_rtrmap_btree.h"
 #include "xfs_rtrefcount_btree.h"
@@ -444,6 +445,31 @@ xlog_dinode_verify(
 }
 
 /*
+ * Verify a logged extents fork. The region is a packed array of on-disk extent
+ * records, so its size fixes the number of records it holds.
+ *
+ * The region size has already been bounds checked against the inode fork size,
+ * so it is known to fit within the fork and does not need rechecking here.
+ */
+static xfs_failaddr_t
+xlog_dinode_verify_extents(
+	struct xfs_mount		*mp,
+	struct xfs_log_dinode		*ldip,
+	int				whichfork,
+	void				*src,
+	unsigned int			size)
+{
+	bool				isrt;
+
+	if (size == 0 || (size % sizeof(struct xfs_bmbt_rec)))
+		return __this_address;
+
+	isrt = ldip->di_flags & XFS_DIFLAG_REALTIME;
+	return xfs_bmap_validate_extent_array(mp, ldip->di_ino, isrt, whichfork,
+			src, size / sizeof(struct xfs_bmbt_rec));
+}
+
+/*
  * Verify a logged shortform symlink target. The logged target is the on-disk
  * form, which is not null terminated, so this cannot use
  * xfs_symlink_shortform_verify().
@@ -538,7 +564,8 @@ xlog_dinode_verify_dfork(
 			return __this_address;
 		if (ilfp->ilf_dsize > fork_size)
 			return __this_address;
-		break;
+		return xlog_dinode_verify_extents(mp, ldip, XFS_DATA_FORK,
+				item->ri_buf[2].iov_base, ilfp->ilf_dsize);
 	case XFS_DINODE_FMT_BTREE:
 	case XFS_DINODE_FMT_META_BTREE:
 		if (field != XFS_ILOG_DBROOT)
@@ -596,7 +623,8 @@ xlog_dinode_verify_afork(
 			return __this_address;
 		if (ilfp->ilf_asize > fork_size)
 			return __this_address;
-		break;
+		return xlog_dinode_verify_extents(mp, ldip, XFS_ATTR_FORK,
+				item->ri_buf[region].iov_base, ilfp->ilf_asize);
 	case XFS_DINODE_FMT_BTREE:
 		if (field != XFS_ILOG_ABROOT)
 			return __this_address;
