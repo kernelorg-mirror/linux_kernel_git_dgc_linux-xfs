@@ -2105,11 +2105,29 @@ xlog_recover_add_item(
 
 	item = kzalloc_obj(struct xlog_recover_item, GFP_KERNEL | __GFP_NOFAIL);
 	INIT_LIST_HEAD(&item->ri_list);
-	list_add_tail(&item->ri_list, &trans->r_itemq);
 
-	/* this is now the item being rebuilt */
+	/*
+	 * The item is not placed on the transaction's item queue until it has
+	 * been fully decoded (see xlog_recover_complete_item()). Until then it
+	 * is tracked as the item currently being rebuilt.
+	 */
 	trans->r_cur_item = item;
 	return item;
+}
+
+/*
+ * A log item has been fully decoded from the journal. Move it onto the
+ * transaction's item queue and clear the current item so the next region
+ * decoded starts a new item.
+ */
+static void
+xlog_recover_complete_item(
+	struct xlog_recover	*trans)
+{
+	struct xlog_recover_item *item = trans->r_cur_item;
+
+	list_add_tail(&item->ri_list, &trans->r_itemq);
+	trans->r_cur_item = NULL;
 }
 
 /*
@@ -2127,7 +2145,8 @@ xlog_recover_init_new_trans(
 	struct xlog_recover	*trans,
 	char			*dp,
 	int			len,
-	bool			cont)
+	bool			cont,
+	bool			region_complete)
 {
 	char			*ptr;
 
@@ -2162,16 +2181,13 @@ xlog_recover_init_new_trans(
 	memcpy(ptr, dp, len);
 
 	/*
-	 * The header is complete once the full struct has been assembled: for
-	 * an unsplit header that is this initial fragment (len == full header),
-	 * and for a split header it is the continuation fragment that finishes
-	 * it. Mark it decoded and add the item that subsequent log item regions
-	 * will be decoded into.
+	 * The transaction header is a single region, so it is fully decoded
+	 * once the region is complete. The header is not a log item, so nothing
+	 * is added to the item queue here; the first log item region decoded
+	 * after this will start the first item.
 	 */
-	if (cont || len == sizeof(struct xfs_trans_header)) {
+	if (region_complete)
 		trans->r_hdr_decoded = true;
-		xlog_recover_add_item(trans);
-	}
 	return 0;
 }
 
@@ -2180,7 +2196,8 @@ xlog_recover_add_to_cont_trans(
 	struct xlog		*log,
 	struct xlog_recover	*trans,
 	char			*dp,
-	int			len)
+	int			len,
+	bool			region_complete)
 {
 	struct xlog_recover_item *item = trans->r_cur_item;
 	char			*ptr, *old_ptr;
@@ -2196,6 +2213,14 @@ xlog_recover_add_to_cont_trans(
 	item->ri_buf[item->ri_cnt-1].iov_len += len;
 	item->ri_buf[item->ri_cnt-1].iov_base = ptr;
 	trace_xfs_log_recover_item_add_cont(log, trans, item, 0);
+
+	/*
+	 * The continued region is only complete once its final fragment has
+	 * been appended. When that finishes the item's last region, the item is
+	 * complete.
+	 */
+	if (region_complete && item->ri_cnt == item->ri_total)
+		xlog_recover_complete_item(trans);
 	return 0;
 }
 
@@ -2217,9 +2242,9 @@ xlog_recover_add_to_trans(
 	struct xlog		*log,
 	struct xlog_recover	*trans,
 	char			*dp,
-	int			len)
+	int			len,
+	bool			region_complete)
 {
-	struct xfs_inode_log_format	*in_f;			/* any will do */
 	struct xlog_recover_item *item;
 	char			*ptr;
 
@@ -2228,17 +2253,17 @@ xlog_recover_add_to_trans(
 
 	ptr = xlog_kvmalloc(len);
 	memcpy(ptr, dp, len);
-	in_f = (struct xfs_inode_log_format *)ptr;
 
-	/* the item currently being rebuilt */
+	/*
+	 * If there is no item currently being rebuilt, this region is the first
+	 * region of a new item. Start the item and use its first region to
+	 * determine how many regions it has.
+	 */
 	item = trans->r_cur_item;
-	if (item->ri_total != 0 &&
-	     item->ri_total == item->ri_cnt) {
-		/* current item is full, start a new one */
-		item = xlog_recover_add_item(trans);
-	}
+	if (!item) {
+		struct xfs_inode_log_format *in_f = /* any will do */
+			(struct xfs_inode_log_format *)ptr;
 
-	if (item->ri_total == 0) {		/* first region to be added */
 		if (in_f->ilf_size == 0 ||
 		    in_f->ilf_size > XLOG_MAX_REGIONS_IN_ITEM) {
 			xfs_warn(log->l_mp,
@@ -2249,6 +2274,7 @@ xlog_recover_add_to_trans(
 			return -EFSCORRUPTED;
 		}
 
+		item = xlog_recover_add_item(trans);
 		item->ri_total = in_f->ilf_size;
 		item->ri_buf = kzalloc_objs(*item->ri_buf, item->ri_total,
 					    GFP_KERNEL | __GFP_NOFAIL);
@@ -2268,6 +2294,14 @@ xlog_recover_add_to_trans(
 	item->ri_buf[item->ri_cnt].iov_len  = len;
 	item->ri_cnt++;
 	trace_xfs_log_recover_item_add(log, trans, item, 0);
+
+	/*
+	 * The item is complete once its final region has been fully decoded. If
+	 * this region continues into the next op record it is not complete yet,
+	 * so the item cannot be either.
+	 */
+	if (region_complete && item->ri_cnt == item->ri_total)
+		xlog_recover_complete_item(trans);
 	return 0;
 }
 
@@ -2276,24 +2310,40 @@ xlog_recover_add_to_trans(
  *
  * Remember that EFIs, EFDs, and IUNLINKs are handled later.
  */
+static void
+xlog_recover_free_item(
+	struct xlog_recover_item *item)
+{
+	int			i;
+
+	/* Free the regions in the item. */
+	for (i = 0; i < item->ri_cnt; i++)
+		kvfree(item->ri_buf[i].iov_base);
+	/* Free the item itself */
+	kfree(item->ri_buf);
+	kfree(item);
+}
+
 STATIC void
 xlog_recover_free_trans(
 	struct xlog_recover	*trans)
 {
 	struct xlog_recover_item *item, *n;
-	int			i;
 
 	hlist_del_init(&trans->r_list);
 
 	list_for_each_entry_safe(item, n, &trans->r_itemq, ri_list) {
-		/* Free the regions in the item. */
 		list_del(&item->ri_list);
-		for (i = 0; i < item->ri_cnt; i++)
-			kvfree(item->ri_buf[i].iov_base);
-		/* Free the item itself */
-		kfree(item->ri_buf);
-		kfree(item);
+		xlog_recover_free_item(item);
 	}
+
+	/*
+	 * An item still being rebuilt has not been added to the item queue yet,
+	 * so free it separately.
+	 */
+	if (trans->r_cur_item)
+		xlog_recover_free_item(trans->r_cur_item);
+
 	/* Free the transaction recover structure */
 	kfree(trans);
 }
@@ -2313,6 +2363,17 @@ xlog_recovery_process_trans(
 {
 	int			error = 0;
 	bool			freeit = false;
+	bool			region_complete;
+
+	/*
+	 * If XLOG_CONTINUE_TRANS is set the current region is only a partial
+	 * fragment that continues into the next op record, so it cannot be
+	 * completed yet. The region is complete once this flag is clear, which
+	 * is the case for both an unsplit region and the final (XLOG_END_TRANS)
+	 * fragment of a split region. Capture this before the flags are masked
+	 * below.
+	 */
+	region_complete = !(flags & XLOG_CONTINUE_TRANS);
 
 	/* mask off ophdr transaction container flags */
 	flags &= ~XLOG_END_TRANS;
@@ -2330,7 +2391,8 @@ xlog_recovery_process_trans(
 	if (!trans->r_hdr_decoded &&
 	    (!flags || (flags & (XLOG_CONTINUE_TRANS | XLOG_WAS_CONT_TRANS)))) {
 		error = xlog_recover_init_new_trans(log, trans, dp, len,
-					flags & XLOG_WAS_CONT_TRANS);
+					flags & XLOG_WAS_CONT_TRANS,
+					region_complete);
 		goto out_error;
 	}
 
@@ -2342,10 +2404,12 @@ xlog_recovery_process_trans(
 	/* expected flag values */
 	case 0:
 	case XLOG_CONTINUE_TRANS:
-		error = xlog_recover_add_to_trans(log, trans, dp, len);
+		error = xlog_recover_add_to_trans(log, trans, dp, len,
+						  region_complete);
 		break;
 	case XLOG_WAS_CONT_TRANS:
-		error = xlog_recover_add_to_cont_trans(log, trans, dp, len);
+		error = xlog_recover_add_to_cont_trans(log, trans, dp, len,
+						       region_complete);
 		break;
 	case XLOG_COMMIT_TRANS:
 		error = xlog_recover_commit_trans(log, trans, pass,
