@@ -418,15 +418,15 @@ xfs_bmap_update_abort_intent(
 static inline bool
 xfs_bui_validate(
 	struct xfs_mount		*mp,
-	struct xfs_bui_log_item		*buip)
+	struct xfs_bui_log_format	*bui_formatp)
 {
 	struct xfs_map_extent		*map;
 
 	/* Only one mapping operation per BUI... */
-	if (buip->bui_format.bui_nextents != XFS_BUI_MAX_FAST_EXTENTS)
+	if (bui_formatp->bui_nextents != XFS_BUI_MAX_FAST_EXTENTS)
 		return false;
 
-	map = &buip->bui_format.bui_extents[0];
+	map = &bui_formatp->bui_extents[0];
 
 	if (map->me_flags & ~XFS_BMAP_EXTENT_FLAGS)
 		return false;
@@ -505,12 +505,7 @@ xfs_bmap_recover_work(
 	int				iext_delta;
 	int				error = 0;
 
-	if (!xfs_bui_validate(mp, buip)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				&buip->bui_format, sizeof(buip->bui_format));
-		return -EFSCORRUPTED;
-	}
-
+	/* The bui was validated when it was recovered. */
 	map = &buip->bui_format.bui_extents[0];
 	work = xfs_bui_recover_work(mp, dfp, &ip, map);
 	if (IS_ERR(work))
@@ -650,28 +645,8 @@ xlog_recover_bui_commit_pass2(
 	struct xfs_mount		*mp = log->l_mp;
 	struct xfs_bui_log_item		*buip;
 	struct xfs_bui_log_format	*bui_formatp;
-	size_t				len;
 
 	bui_formatp = item->ri_buf[0].iov_base;
-
-	if (item->ri_buf[0].iov_len < xfs_bui_log_format_sizeof(0)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
-
-	if (bui_formatp->bui_nextents != XFS_BUI_MAX_FAST_EXTENTS) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
-
-	len = xfs_bui_log_format_sizeof(bui_formatp->bui_nextents);
-	if (item->ri_buf[0].iov_len != len) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
 
 	buip = xfs_bui_init(mp);
 	xfs_bui_copy_format(&buip->bui_format, bui_formatp);
@@ -682,8 +657,62 @@ xlog_recover_bui_commit_pass2(
 	return 0;
 }
 
+/*
+ * The bui is a single region with exactly one mapping operation, so its length
+ * must match a single extent.
+ */
+static int
+xlog_recover_bui_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	struct xfs_bui_log_format	*bui_formatp =
+		item->ri_buf[region_index].iov_base;
+	size_t				len = item->ri_buf[region_index].iov_len;
+
+	if (len < xfs_bui_log_format_sizeof(0)) {
+		xfs_warn(log->l_mp, "BUI: bad item region length %zu recovered.",
+				len);
+		return -EFSCORRUPTED;
+	}
+
+	if (bui_formatp->bui_nextents != XFS_BUI_MAX_FAST_EXTENTS) {
+		xfs_warn(log->l_mp, "BUI: bad extent count %u recovered.",
+				bui_formatp->bui_nextents);
+		return -EFSCORRUPTED;
+	}
+
+	if (len != xfs_bui_log_format_sizeof(bui_formatp->bui_nextents)) {
+		xfs_warn(log->l_mp,
+			"BUI: item region length %zu does not match %u extents recovered.",
+			len, bui_formatp->bui_nextents);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
+/* Validate the bmap update mapping in the bui. */
+static int
+xlog_recover_bui_validate_item(
+	struct xlog			*log,
+	struct xlog_recover_item	*item)
+{
+	if (!xfs_bui_validate(log->l_mp, item->ri_buf[0].iov_base)) {
+		xfs_warn(log->l_mp, "BUI: bad mapping recovered.");
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
 const struct xlog_recover_item_ops xlog_bui_item_ops = {
 	.item_type		= XFS_LI_BUI,
+	.min_hdr_len		= sizeof(struct xfs_bui_log_format),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_bui_validate_region,
+	.validate_item		= xlog_recover_bui_validate_item,
 	.commit_pass2		= xlog_recover_bui_commit_pass2,
 };
 
