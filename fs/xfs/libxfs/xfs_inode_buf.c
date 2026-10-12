@@ -477,17 +477,18 @@ xfs_dinode_verify_fork(
 	return NULL;
 }
 
-static xfs_failaddr_t
-xfs_dinode_verify_forkoff(
-	struct xfs_dinode	*dip,
-	struct xfs_mount	*mp)
+xfs_failaddr_t
+xfs_inode_verify_forkoff(
+	struct xfs_mount	*mp,
+	uint8_t			forkoff,
+	uint8_t			format)
 {
-	if (!dip->di_forkoff)
+	if (!forkoff)
 		return NULL;
 
-	switch (dip->di_format)  {
+	switch (format)  {
 	case XFS_DINODE_FMT_DEV:
-		if (dip->di_forkoff != (roundup(sizeof(xfs_dev_t), 8) >> 3))
+		if (forkoff != (roundup(sizeof(xfs_dev_t), 8) >> 3))
 			return __this_address;
 		break;
 	case XFS_DINODE_FMT_META_BTREE:
@@ -497,7 +498,7 @@ xfs_dinode_verify_forkoff(
 	case XFS_DINODE_FMT_LOCAL:	/* fall through ... */
 	case XFS_DINODE_FMT_EXTENTS:    /* fall through ... */
 	case XFS_DINODE_FMT_BTREE:
-		if (dip->di_forkoff >= (XFS_LITINO(mp) >> 3))
+		if (forkoff >= (XFS_LITINO(mp) >> 3))
 			return __this_address;
 		break;
 	default:
@@ -683,7 +684,7 @@ xfs_dinode_verify(
 		return __this_address;
 
 	/* check for illegal values of forkoff */
-	fa = xfs_dinode_verify_forkoff(dip, mp);
+	fa = xfs_inode_verify_forkoff(mp, dip->di_forkoff, dip->di_format);
 	if (fa)
 		return fa;
 
