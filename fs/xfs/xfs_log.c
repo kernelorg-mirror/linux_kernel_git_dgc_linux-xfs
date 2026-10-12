@@ -811,12 +811,27 @@ xlog_write_one_vec(
 	struct xfs_log_iovec	*reg,
 	struct xlog_ticket	*ticket)
 {
+	struct xlog_op_header	*ophdr = reg->i_addr;
 	struct xfs_log_vec	lv = {
 		.lv_niovecs	= 1,
 		.lv_iovecp	= reg,
 		.lv_bytes	= reg->i_len,
 	};
 	LIST_HEAD		(lv_chain);
+
+	/*
+	 * The caller builds the operation header itself, and xlog_write() no
+	 * longer rewrites the length when the region is written whole. Make sure
+	 * the length the caller recorded in the header matches the region, so a
+	 * bad header is caught here rather than being written to the log.
+	 */
+	if (reg->i_len != sizeof(*ophdr) + be32_to_cpu(ophdr->oh_len)) {
+		xfs_alert(log->l_mp,
+			"%s: region length %u does not match op header length %u",
+			__func__, reg->i_len, be32_to_cpu(ophdr->oh_len));
+		xlog_force_shutdown(log, SHUTDOWN_CORRUPT_INCORE);
+		return -EFSCORRUPTED;
+	}
 
 	/* account for space used by record data */
 	ticket->t_curr_res -= lv.lv_bytes;
@@ -842,6 +857,7 @@ xlog_write_unmount_record(
 		.ophdr = {
 			.oh_clientid = XFS_LOG,
 			.oh_tid = cpu_to_be32(ticket->t_tid),
+			.oh_len = cpu_to_be32(sizeof(struct xfs_unmount_log_format)),
 			.oh_flags = XLOG_UNMOUNT_TRANS,
 		},
 		.ulf = {
