@@ -884,18 +884,45 @@ xlog_recover_rud_commit_pass2(
 	struct xfs_rud_log_format	*rud_formatp;
 
 	rud_formatp = item->ri_buf[0].iov_base;
-	if (item->ri_buf[0].iov_len != sizeof(struct xfs_rud_log_format)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, log->l_mp,
-				rud_formatp, item->ri_buf[0].iov_len);
+	xlog_recover_release_intent(log, XFS_LI_RUI, rud_formatp->rud_rui_id);
+	return 0;
+}
+
+/*
+ * The rud is a single fixed size region. This is shared by the data and
+ * realtime rud items, which have identical formats.
+ */
+static int
+xlog_recover_rud_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	struct xfs_rud_log_format	*rud_formatp =
+		item->ri_buf[region_index].iov_base;
+
+	if (item->ri_buf[region_index].iov_len !=
+			sizeof(struct xfs_rud_log_format)) {
+		xfs_warn(log->l_mp, "RUD: bad item region length %zu recovered.",
+				item->ri_buf[region_index].iov_len);
 		return -EFSCORRUPTED;
 	}
 
-	xlog_recover_release_intent(log, XFS_LI_RUI, rud_formatp->rud_rui_id);
+	/* The padding is always written as zero. */
+	if (rud_formatp->__pad != 0) {
+		xfs_warn(log->l_mp, "RUD: bad padding 0x%x recovered.",
+				rud_formatp->__pad);
+		return -EFSCORRUPTED;
+	}
+
 	return 0;
 }
 
 const struct xlog_recover_item_ops xlog_rud_item_ops = {
 	.item_type		= XFS_LI_RUD,
+	.min_hdr_len		= sizeof(struct xfs_rud_log_format),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_rud_validate_region,
 	.commit_pass2		= xlog_recover_rud_commit_pass2,
 };
 
@@ -910,12 +937,6 @@ xlog_recover_rtrud_commit_pass2(
 	struct xfs_rud_log_format	*rud_formatp;
 
 	rud_formatp = item->ri_buf[0].iov_base;
-	if (item->ri_buf[0].iov_len != sizeof(struct xfs_rud_log_format)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, log->l_mp,
-				rud_formatp, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
-
 	xlog_recover_release_intent(log, XFS_LI_RUI_RT,
 			rud_formatp->rud_rui_id);
 	return 0;
@@ -926,5 +947,8 @@ xlog_recover_rtrud_commit_pass2(
 
 const struct xlog_recover_item_ops xlog_rtrud_item_ops = {
 	.item_type		= XFS_LI_RUD_RT,
+	.min_hdr_len		= sizeof(struct xfs_rud_log_format),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_rud_validate_region,
 	.commit_pass2		= xlog_recover_rtrud_commit_pass2,
 };
