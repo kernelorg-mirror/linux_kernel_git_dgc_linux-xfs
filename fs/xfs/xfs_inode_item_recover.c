@@ -30,17 +30,10 @@ xlog_recover_inode_ra_pass2(
 	struct xlog                     *log,
 	struct xlog_recover_item        *item)
 {
-	if (item->ri_buf[0].iov_len == sizeof(struct xfs_inode_log_format)) {
-		struct xfs_inode_log_format	*ilfp = item->ri_buf[0].iov_base;
+	struct xfs_inode_log_format	*ilfp = item->ri_buf[0].iov_base;
 
-		xlog_buf_readahead(log, ilfp->ilf_blkno, ilfp->ilf_len,
-				   &xfs_inode_buf_ra_ops);
-	} else {
-		struct xfs_inode_log_format_32	*ilfp = item->ri_buf[0].iov_base;
-
-		xlog_buf_readahead(log, ilfp->ilf_blkno, ilfp->ilf_len,
-				   &xfs_inode_buf_ra_ops);
-	}
+	xlog_buf_readahead(log, ilfp->ilf_blkno, ilfp->ilf_len,
+			   &xfs_inode_buf_ra_ops);
 }
 
 /*
@@ -304,6 +297,75 @@ xlog_recover_inode_dbroot(
 	return 0;
 }
 
+/*
+ * An inode item is a format header region, the log dinode core, and up to two
+ * fork regions, so it has two to four regions. The exact count depends on the
+ * fields logged and is checked once the format header is decoded.
+ */
+static int
+xlog_recover_inode_nregions(
+	struct xlog			*log,
+	uint16_t			nregions)
+{
+	if (nregions < 2 || nregions > 4)
+		return -EFSCORRUPTED;
+	return nregions;
+}
+
+/*
+ * The format header (region 0) is logged in either the host format or the 32
+ * bit on-disk format, so it must match one of those two sizes.
+ */
+static int
+xlog_recover_inode_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	size_t				len = item->ri_buf[region_index].iov_len;
+
+	if (region_index > 0)
+		return 0;
+
+	if (len != sizeof(struct xfs_inode_log_format) &&
+	    len != sizeof(struct xfs_inode_log_format_32)) {
+		xfs_warn(log->l_mp,
+			"INODE: bad format region length %zu recovered.", len);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
+/*
+ * Convert the format header to host format so the rest of recovery can treat
+ * region 0 as a struct xfs_inode_log_format without regard for the on-disk
+ * format. A header already in host format is left in place.
+ */
+static int
+xlog_recover_inode_validate_item(
+	struct xlog			*log,
+	struct xlog_recover_item	*item)
+{
+	struct xfs_inode_log_format	*in_f;
+	int				error;
+
+	if (item->ri_buf[0].iov_len == sizeof(struct xfs_inode_log_format))
+		return 0;
+
+	in_f = kmalloc_obj(struct xfs_inode_log_format, GFP_KERNEL | __GFP_NOFAIL);
+	error = xfs_inode_item_format_convert(&item->ri_buf[0], in_f);
+	if (error) {
+		kfree(in_f);
+		return error;
+	}
+
+	kvfree(item->ri_buf[0].iov_base);
+	item->ri_buf[0].iov_base = in_f;
+	item->ri_buf[0].iov_len = sizeof(struct xfs_inode_log_format);
+	return 0;
+}
+
 STATIC int
 xlog_recover_inode_commit_pass2(
 	struct xlog			*log,
@@ -311,7 +373,7 @@ xlog_recover_inode_commit_pass2(
 	struct xlog_recover_item	*item,
 	xfs_lsn_t			current_lsn)
 {
-	struct xfs_inode_log_format	*in_f;
+	struct xfs_inode_log_format	*in_f = item->ri_buf[0].iov_base;
 	struct xfs_mount		*mp = log->l_mp;
 	struct xfs_buf			*bp;
 	struct xfs_dinode		*dip;
@@ -323,35 +385,22 @@ xlog_recover_inode_commit_pass2(
 	uint				fields;
 	struct xfs_log_dinode		*ldip;
 	uint				isize;
-	int				need_free = 0;
 	xfs_failaddr_t			fa;
-
-	if (item->ri_buf[0].iov_len == sizeof(struct xfs_inode_log_format)) {
-		in_f = item->ri_buf[0].iov_base;
-	} else {
-		in_f = kmalloc_obj(struct xfs_inode_log_format,
-				   GFP_KERNEL | __GFP_NOFAIL);
-		need_free = 1;
-		error = xfs_inode_item_format_convert(&item->ri_buf[0], in_f);
-		if (error)
-			goto error;
-	}
 
 	/*
 	 * Inode buffers can be freed, look out for it,
 	 * and do not replay the inode.
 	 */
 	if (xlog_is_buffer_cancelled(log, in_f->ilf_blkno, in_f->ilf_len)) {
-		error = 0;
 		trace_xfs_log_recover_inode_cancel(log, in_f);
-		goto error;
+		return 0;
 	}
 	trace_xfs_log_recover_inode_recover(log, in_f);
 
 	error = xfs_buf_read(mp->m_ddev_targp, in_f->ilf_blkno, in_f->ilf_len,
 			0, &bp, &xfs_inode_buf_ops);
 	if (error)
-		goto error;
+		return error;
 	ASSERT(in_f->ilf_fields & XFS_ILOG_CORE);
 	dip = xfs_buf_offset(bp, in_f->ilf_boffset);
 
@@ -608,14 +657,15 @@ out_owner_change:
 
 out_release:
 	xfs_buf_relse(bp);
-error:
-	if (need_free)
-		kfree(in_f);
 	return error;
 }
 
 const struct xlog_recover_item_ops xlog_inode_item_ops = {
 	.item_type		= XFS_LI_INODE,
+	.min_hdr_len		= sizeof(struct xfs_inode_log_format_32),
+	.validate_nregions	= xlog_recover_inode_nregions,
+	.validate_region	= xlog_recover_inode_validate_region,
+	.validate_item		= xlog_recover_inode_validate_item,
 	.ra_pass2		= xlog_recover_inode_ra_pass2,
 	.commit_pass2		= xlog_recover_inode_commit_pass2,
 };
