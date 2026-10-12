@@ -324,14 +324,12 @@ xfs_exchmaps_abort_intent(
 static inline bool
 xfs_xmi_validate(
 	struct xfs_mount		*mp,
-	struct xfs_xmi_log_item		*xmi_lip)
+	struct xfs_xmi_log_format	*xlf)
 {
-	struct xfs_xmi_log_format	*xlf = &xmi_lip->xmi_format;
-
 	if (!xfs_has_exchange_range(mp))
 		return false;
 
-	if (xmi_lip->xmi_format.__pad != 0)
+	if (xlf->__pad != 0)
 		return false;
 
 	if (xlf->xmi_flags & ~XFS_EXCHMAPS_LOGGED_FLAGS)
@@ -447,13 +445,7 @@ xfs_exchmaps_recover_work(
 	struct xfs_inode		*ip1, *ip2;
 	int				error = 0;
 
-	if (!xfs_xmi_validate(mp, xmi_lip)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				&xmi_lip->xmi_format,
-				sizeof(xmi_lip->xmi_format));
-		return -EFSCORRUPTED;
-	}
-
+	/* The xmi was validated when it was recovered. */
 	xmi = xfs_xmi_item_recover_intent(mp, dfp, &xmi_lip->xmi_format, &req,
 			&ip1, &ip2);
 	if (IS_ERR(xmi))
