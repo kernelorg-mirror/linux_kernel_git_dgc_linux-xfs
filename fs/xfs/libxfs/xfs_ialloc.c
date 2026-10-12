@@ -2449,6 +2449,10 @@ xfs_imap_lookup(
 
 /*
  * Return the location of the inode in imap, for mapping it into a buffer.
+ *
+ * If the caller cannot allow a btree lookup to be performed, then it should set
+ * XFS_IMAP_NO_LOOKUP. If arithmetic mapping cannot be performed, we return
+ * -EAGAIN to inform the caller mapping failed due to a lookup being required.
  */
 int
 xfs_imap(
@@ -2535,6 +2539,9 @@ xfs_imap(
 		 * Otherwise we have to do a btree lookup to find the location.
 		 */
 	}
+
+	if (flags & XFS_IMAP_NO_LOOKUP)
+		return -EAGAIN;
 
 	error = xfs_imap_lookup(pag, tp, agino, agbno, &chunk_agbno,
 			&offset_agbno, flags);
