@@ -24,6 +24,8 @@
 #include "xfs_ialloc.h"
 #include "xfs_ag.h"
 #include "xfs_dir2.h"
+#include "xfs_dir2_priv.h"
+#include "xfs_attr_leaf.h"
 #include "xfs_metafile.h"
 #include "xfs_bmap_btree.h"
 #include "xfs_rtrmap_btree.h"
@@ -442,6 +444,45 @@ xlog_dinode_verify(
 }
 
 /*
+ * Verify a logged shortform symlink target. The logged target is the on-disk
+ * form, which is not null terminated, so this cannot use
+ * xfs_symlink_shortform_verify().
+ */
+static xfs_failaddr_t
+xlog_dinode_verify_symlink(
+	void			*sfp,
+	unsigned int		size)
+{
+	if (size == 0 || size > XFS_SYMLINK_MAXLEN)
+		return __this_address;
+
+	/* The target must not contain a null. */
+	if (memchr(sfp, 0, size))
+		return __this_address;
+
+	return NULL;
+}
+
+/*
+ * Verify the contents of a logged local format data fork. A directory holds a
+ * shortform directory, and a symlink holds its target. A regular file has no
+ * local format data fork.
+ */
+static xfs_failaddr_t
+xlog_dinode_verify_local_dfork(
+	struct xfs_mount		*mp,
+	struct xfs_log_dinode		*ldip,
+	void				*src,
+	unsigned int			size)
+{
+	if (S_ISDIR(ldip->di_mode))
+		return xfs_dir2_sf_verify(mp, src, size);
+	if (S_ISLNK(ldip->di_mode))
+		return xlog_dinode_verify_symlink(src, size);
+	return __this_address;
+}
+
+/*
  * Verify the logged data fork against the core and the fork region that carries
  * it. The core has already been verified, so the mode and fork offset can be
  * trusted here. The data fork format must be valid for the inode mode, whether
@@ -449,9 +490,9 @@ xlog_dinode_verify(
  * the fork was logged, the field logged for it must match that format, and the
  * region holding it must be the size the format header records. A local or
  * extents fork is copied verbatim into the inode fork, so it must also fit
- * within the space the fork offset leaves for it. A btree fork is logged in the
- * larger expanded form and compressed into the fork on replay, so it does not
- * get the fit check. The contents of the region are not inspected.
+ * within the space the fork offset leaves for it, and a local fork must hold
+ * valid contents. A btree fork is logged in the larger expanded form and
+ * compressed into the fork on replay, so it does not get the fit check.
  */
 static xfs_failaddr_t
 xlog_dinode_verify_dfork(
@@ -490,7 +531,8 @@ xlog_dinode_verify_dfork(
 			return __this_address;
 		if (ilfp->ilf_dsize > fork_size)
 			return __this_address;
-		break;
+		return xlog_dinode_verify_local_dfork(mp, ldip,
+				item->ri_buf[2].iov_base, ilfp->ilf_dsize);
 	case XFS_DINODE_FMT_EXTENTS:
 		if (field != XFS_ILOG_DEXT)
 			return __this_address;
@@ -547,7 +589,8 @@ xlog_dinode_verify_afork(
 			return __this_address;
 		if (ilfp->ilf_asize > fork_size)
 			return __this_address;
-		break;
+		return xfs_attr_shortform_verify(item->ri_buf[region].iov_base,
+				ilfp->ilf_asize);
 	case XFS_DINODE_FMT_EXTENTS:
 		if (field != XFS_ILOG_AEXT)
 			return __this_address;
