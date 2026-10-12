@@ -2618,8 +2618,6 @@ xlog_recover_ophdr_to_trans(
 	if (!(ohead->oh_flags & XLOG_START_TRANS))
 		return NULL;
 
-	ASSERT(be32_to_cpu(ohead->oh_len) == 0);
-
 	/*
 	 * This is a new transaction so allocate a new recovery container to
 	 * hold the recovery ops that will follow.
@@ -2726,9 +2724,19 @@ xlog_recover_validate_ophdr(
 	 * stand alone.
 	 */
 	switch (ohead->oh_flags) {
-	case 0:
 	case XLOG_START_TRANS:
 	case XLOG_COMMIT_TRANS:
+		/*
+		 * Start and commit records only bracket a transaction and carry
+		 * no data of their own.
+		 */
+		if (len != 0) {
+			xfs_warn(log->l_mp, "%s: bad control record length 0x%x",
+				__func__, len);
+			return ERR_PTR(-EFSCORRUPTED);
+		}
+		break;
+	case 0:
 	case XLOG_CONTINUE_TRANS:
 	case XLOG_WAS_CONT_TRANS | XLOG_CONTINUE_TRANS:
 	case XLOG_WAS_CONT_TRANS | XLOG_END_TRANS:
