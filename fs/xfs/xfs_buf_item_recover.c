@@ -1189,9 +1189,55 @@ xlog_recover_buf_nregions(
 	return nregions;
 }
 
+/*
+ * Region 0 is the format header. The fixed prefix is already checked by
+ * min_hdr_len, so check that the used part of the dirty bitmap does not exceed
+ * the bitmap and fits within the region. Later regions are the dirty ranges of
+ * the buffer, each covering whole chunks of it. The region length has already
+ * been bounds checked against XLOG_MAX_REGION_SIZE during assembly, so only the
+ * lower bound and chunk alignment are checked here.
+ */
+static int
+xlog_recover_buf_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	size_t				len = item->ri_buf[region_index].iov_len;
+
+	if (region_index == 0) {
+		struct xfs_buf_log_format *blf = item->ri_buf[0].iov_base;
+
+		if (blf->blf_map_size > XFS_BLF_DATAMAP_SIZE) {
+			xfs_warn(log->l_mp,
+				"BUF: bad dirty bitmap size %u recovered.",
+				blf->blf_map_size);
+			return -EFSCORRUPTED;
+		}
+		if (!xfs_buf_log_check_iovec(&item->ri_buf[0])) {
+			xfs_warn(log->l_mp,
+				"BUF: bad format region length %zu recovered.",
+				len);
+			return -EFSCORRUPTED;
+		}
+		return 0;
+	}
+
+	if (len == 0 || (len % XFS_BLF_CHUNK)) {
+		xfs_warn(log->l_mp,
+			"BUF: bad region %d length %zu recovered.",
+			region_index, len);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
 const struct xlog_recover_item_ops xlog_buf_item_ops = {
 	.item_type		= XFS_LI_BUF,
+	.min_hdr_len		= offsetof(struct xfs_buf_log_format, blf_data_map),
 	.validate_nregions	= xlog_recover_buf_nregions,
+	.validate_region	= xlog_recover_buf_validate_region,
 	.reorder		= xlog_recover_buf_reorder,
 	.ra_pass2		= xlog_recover_buf_ra_pass2,
 	.commit_pass1		= xlog_recover_buf_commit_pass1,
