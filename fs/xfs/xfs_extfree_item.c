@@ -174,14 +174,13 @@ xfs_efi_init(
 }
 
 /*
- * Copy an EFI format buffer from the given buf, and into the destination
- * EFI format structure.
- * The given buffer can be in 32 bit or 64 bit form (which has different padding),
- * one of which will be the native format for this kernel.
- * It will handle the conversion of formats if necessary.
+ * Convert an on-disk EFI format buffer into the given host format structure.
+ * The buffer is in 32 bit or 64 bit on-disk form (which have different padding);
+ * a buffer already in host format does not need conversion and is not passed
+ * here. The buffer has already been validated as one of these two formats.
  */
 STATIC void
-xfs_efi_copy_format(
+xfs_efi_to_host_format(
 	struct kvec			*buf,
 	struct xfs_efi_log_format	*dst_efi_fmt)
 {
@@ -190,20 +189,6 @@ xfs_efi_copy_format(
 	struct xfs_efi_log_format_64	*src_efi_fmt_64;
 	uint				nextents = src_efi_fmt->efi_nextents;
 	uint				i;
-
-	/*
-	 * The buffer has already been validated as one of the three formats, so
-	 * pick which one it is by its length and copy it into the native form.
-	 */
-	if (buf->iov_len == xfs_efi_log_format_sizeof(nextents)) {
-		memcpy(dst_efi_fmt, src_efi_fmt,
-		       offsetof(struct xfs_efi_log_format, efi_extents));
-		for (i = 0; i < nextents; i++)
-			memcpy(&dst_efi_fmt->efi_extents[i],
-			       &src_efi_fmt->efi_extents[i],
-			       sizeof(struct xfs_extent));
-		return;
-	}
 
 	if (buf->iov_len == xfs_efi_log_format32_sizeof(nextents)) {
 		src_efi_fmt_32 = buf->iov_base;
@@ -660,23 +645,10 @@ xfs_extent_free_recover_work(
 	int				error = 0;
 	bool				isrt = xfs_efi_item_isrt(lip);
 
-	/*
-	 * First check the validity of the extents described by the EFI.  If
-	 * any are bad, then assume that all are bad and just toss the EFI.
-	 * Mixing RT and non-RT extents in the same EFI item is not allowed.
-	 */
-	for (i = 0; i < efip->efi_format.efi_nextents; i++) {
-		if (!xfs_efi_validate_ext(mp, isrt,
-					&efip->efi_format.efi_extents[i])) {
-			XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-					&efip->efi_format,
-					sizeof(efip->efi_format));
-			return -EFSCORRUPTED;
-		}
-
+	/* The extents were validated when the efi was recovered. */
+	for (i = 0; i < efip->efi_format.efi_nextents; i++)
 		xfs_efi_recover_work(mp, dfp, isrt,
 				&efip->efi_format.efi_extents[i]);
-	}
 
 	resv = xlog_recover_resv(&M_RES(mp)->tr_itruncate);
 	error = xfs_trans_alloc(mp, &resv, 0, 0, 0, &tp);
@@ -868,7 +840,7 @@ xlog_recover_efi_commit_pass2(
 	efi_formatp = item->ri_buf[0].iov_base;
 
 	efip = xfs_efi_init(mp, ITEM_TYPE(item), efi_formatp->efi_nextents);
-	xfs_efi_copy_format(&item->ri_buf[0], &efip->efi_format);
+	memcpy(&efip->efi_format, efi_formatp, item->ri_buf[0].iov_len);
 	atomic_set(&efip->efi_next_extent, efi_formatp->efi_nextents);
 
 	xlog_recover_intent_item(log, &efip->efi_item, lsn,
@@ -925,11 +897,52 @@ xlog_recover_efi_validate_region(
 	return 0;
 }
 
+/*
+ * Convert the efi to host format and validate its contents. Later recovery then
+ * iterates ri_buf[0] as a host struct xfs_efi_log_format without caring about
+ * the on-disk format. The conversion only needs to allocate a new buffer when
+ * the on-disk format differs in size from the host format; a buffer already in
+ * host format is validated in place.
+ */
+static int
+xlog_recover_efi_validate_item(
+	struct xlog			*log,
+	struct xlog_recover_item	*item)
+{
+	struct xfs_efi_log_format	*efi_formatp = item->ri_buf[0].iov_base;
+	uint32_t			nextents = efi_formatp->efi_nextents;
+	size_t				host_len = xfs_efi_log_format_sizeof(nextents);
+	bool				isrt = ITEM_TYPE(item) == XFS_LI_EFI_RT;
+	uint32_t			i;
+
+	if (item->ri_buf[0].iov_len != host_len) {
+		efi_formatp = xlog_kvmalloc(host_len);
+		xfs_efi_to_host_format(&item->ri_buf[0], efi_formatp);
+		kvfree(item->ri_buf[0].iov_base);
+		item->ri_buf[0].iov_base = efi_formatp;
+		item->ri_buf[0].iov_len = host_len;
+	}
+
+	for (i = 0; i < nextents; i++) {
+		struct xfs_extent	*extp = &efi_formatp->efi_extents[i];
+
+		if (!xfs_efi_validate_ext(log->l_mp, isrt, extp)) {
+			xfs_warn(log->l_mp,
+	"EFI: bad extent %u (start 0x%llx, len 0x%x) recovered.",
+				i, extp->ext_start, extp->ext_len);
+			return -EFSCORRUPTED;
+		}
+	}
+
+	return 0;
+}
+
 const struct xlog_recover_item_ops xlog_efi_item_ops = {
 	.item_type		= XFS_LI_EFI,
 	.min_hdr_len		= sizeof(struct xfs_efi_log_format),
 	.validate_nregions	= xlog_recover_single_region,
 	.validate_region	= xlog_recover_efi_validate_region,
+	.validate_item		= xlog_recover_efi_validate_item,
 	.commit_pass2		= xlog_recover_efi_commit_pass2,
 };
 
@@ -948,7 +961,7 @@ xlog_recover_rtefi_commit_pass2(
 	efi_formatp = item->ri_buf[0].iov_base;
 
 	efip = xfs_efi_init(mp, ITEM_TYPE(item), efi_formatp->efi_nextents);
-	xfs_efi_copy_format(&item->ri_buf[0], &efip->efi_format);
+	memcpy(&efip->efi_format, efi_formatp, item->ri_buf[0].iov_len);
 	atomic_set(&efip->efi_next_extent, efi_formatp->efi_nextents);
 
 	xlog_recover_intent_item(log, &efip->efi_item, lsn,
@@ -974,6 +987,7 @@ const struct xlog_recover_item_ops xlog_rtefi_item_ops = {
 	.min_hdr_len		= sizeof(struct xfs_efi_log_format),
 	.validate_nregions	= xlog_recover_single_region,
 	.validate_region	= xlog_recover_efi_validate_region,
+	.validate_item		= xlog_recover_efi_validate_item,
 	.commit_pass2		= xlog_recover_rtefi_commit_pass2,
 };
 
