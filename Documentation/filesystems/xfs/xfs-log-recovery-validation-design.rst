@@ -70,8 +70,9 @@ c) Look up the item ops via ``xlog_find_item_ops()``
 d) If the type is unknown, reject immediately with ``-EFSCORRUPTED``
 e) Store ``item->ri_ops`` at this point (currently done in
    ``reorder_trans``)
-f) Validate ``ilf_size`` against ``ops->min_regions`` and
-   ``ops->max_regions``
+f) Validate the region count via ``ops->validate_nregions()`` (or the
+   generic ``xlog_recover_nregions()`` helper if the type does not supply
+   one), and use its return value as the number of regions to assemble
 g) Validate ``len >= ops->min_hdr_len`` (the minimum format header size)
 
 Transaction header as a validated type
@@ -110,36 +111,46 @@ ops entry by having the generic code recognise it as a special case
 at step (b) and apply its fixed constraints directly. Either approach
 works; the ops entry is cleaner but the special case is simpler.
 
-New fields in ``struct xlog_recover_item_ops``::
+New members in ``struct xlog_recover_item_ops``::
 
-    uint16_t    min_regions;    /* minimum valid ri_total */
-    uint16_t    max_regions;    /* maximum valid ri_total */
     uint16_t    min_hdr_len;    /* minimum ri_buf[0].iov_len */
+    int (*validate_nregions)(struct xlog *log, uint16_t nregions);
 
-These are compile-time constants per item type. Examples:
+``min_hdr_len`` is a compile-time constant per item type. The region count
+is validated by the ``validate_nregions()`` method rather than a static
+min/max pair: it is given the raw count read from the journal and returns
+the number of regions to assemble, or a negative error. This is a method,
+not a bound, because not all recovered types describe their regions with the
+same "type/size" format header that log items use, so each such type must
+extract and validate its own count. Types that do use the common layout
+supply no method and fall back to the generic ``xlog_recover_nregions()``
+helper, which accepts any ``0 < count <= XLOG_MAX_REGIONS_IN_ITEM``.
 
-===========  ===========  ===========  ==============================
-Item Type    min_regions  max_regions  min_hdr_len
-===========  ===========  ===========  ==============================
-TRANS_HDR    1            1            sizeof(xfs_trans_header)
-BUF          2            XLOG_MAX..   sizeof(xfs_buf_log_format)
-INODE        2            4            sizeof(xfs_inode_log_format)
-DQUOT        2            2            sizeof(xfs_dq_logformat)
-EFI          1            1            sizeof(xfs_efi_log_format)
-EFD          1            1            sizeof(xfs_efd_log_format)
-RUI          1            1            sizeof(xfs_rui_log_format)
-RUD          1            1            sizeof(xfs_rud_log_format)
-CUI          1            1            sizeof(xfs_cui_log_format)
-CUD          1            1            sizeof(xfs_cud_log_format)
-BUI          1            1            sizeof(xfs_bui_log_format)
-BUD          1            1            sizeof(xfs_bud_log_format)
-ATTRI        2            5            sizeof(xfs_attri_log_format)
-ATTRD        1            1            sizeof(xfs_attrd_log_format)
-XMI          1            1            sizeof(xfs_xmi_log_format)
-XMD          1            1            sizeof(xfs_xmd_log_format)
-ICREATE      1            1            sizeof(xfs_icreate_log)
-QUOTAOFF     1            1            sizeof(xfs_qoff_logformat)
-===========  ===========  ===========  ==============================
+Examples of the region count each type should accept and the minimum header
+length:
+
+===========  =====================  ==============================
+Item Type    regions                min_hdr_len
+===========  =====================  ==============================
+TRANS_HDR    1 (magic-derived)      sizeof(xfs_trans_header)
+BUF          2 .. XLOG_MAX..        sizeof(xfs_buf_log_format)
+INODE        2 .. 4                 sizeof(xfs_inode_log_format)
+DQUOT        2                      sizeof(xfs_dq_logformat)
+EFI          1                      sizeof(xfs_efi_log_format)
+EFD          1                      sizeof(xfs_efd_log_format)
+RUI          1                      sizeof(xfs_rui_log_format)
+RUD          1                      sizeof(xfs_rud_log_format)
+CUI          1                      sizeof(xfs_cui_log_format)
+CUD          1                      sizeof(xfs_cud_log_format)
+BUI          1                      sizeof(xfs_bui_log_format)
+BUD          1                      sizeof(xfs_bud_log_format)
+ATTRI        2 .. 5                 sizeof(xfs_attri_log_format)
+ATTRD        1                      sizeof(xfs_attrd_log_format)
+XMI          1                      sizeof(xfs_xmi_log_format)
+XMD          1                      sizeof(xfs_xmd_log_format)
+ICREATE      1                      sizeof(xfs_icreate_log)
+QUOTAOFF     1                      sizeof(xfs_qoff_logformat)
+===========  =====================  ==============================
 
 (RT variants same as their non-RT counterparts.)
 
@@ -355,8 +366,9 @@ region assembly code:
 
    - Check ``len >= 4`` before reading the type and size fields (except
      for the zero-length transaction header continuation case)
-   - After looking up ops, validate ``ilf_size`` against ops constraints
-     before using it for the ``kzalloc_objs`` allocation
+   - After looking up ops, validate the region count via
+     ``ops->validate_nregions()`` (or the generic helper) and use its
+     return value for the ``kzalloc_objs`` allocation
 
 3. ``xlog_recover_process_data()``:
 
@@ -372,25 +384,34 @@ region assembly code:
 Implementation Plan
 ===================
 
-The infrastructure fields and callbacks in ``struct
-xlog_recover_item_ops`` (the ``min_regions``/``max_regions``/``min_hdr_len``
-fields and the ``validate_region`` callback) are introduced first, before
-the transaction header ops entry that uses them. Later patches populate
-those fields and callbacks for the remaining item types and wire up the
-generic call sites. Each patch builds cleanly and is independently
+The infrastructure in ``struct xlog_recover_item_ops`` (the ``min_hdr_len``
+field and the ``validate_nregions``, ``validate_region``, ``validate_item``
+and ``complete`` callbacks) is introduced first, along with the generic
+region and item completion path that calls them, before the transaction
+header ops entry that uses them. Later patches populate those callbacks for
+the remaining item types. Each patch builds cleanly and is independently
 testable.
 
 Phase 1: Generic infrastructure, early ops lookup, transaction header
 ---------------------------------------------------------------------
 
 Patch 1: Add validation infrastructure to the ops struct
-    - Add the ``min_regions``/``max_regions``/``min_hdr_len`` fields to
-      ``struct xlog_recover_item_ops``
-    - Add the ``validate_region`` callback to ``struct
-      xlog_recover_item_ops``
-    - No behaviour change yet: the fields are zero and the callback is
-      NULL for all existing item types; nothing reads them until later
-      patches
+    - Add the ``min_hdr_len`` field and the ``validate_nregions``,
+      ``validate_region``, ``validate_item`` and ``complete`` callbacks to
+      ``struct xlog_recover_item_ops`` (plus the ``XLOG_RECOVER_ITEM_CONSUMED``
+      return value for ``complete``)
+    - Fold the start of a new item into ``xlog_recover_add_item()``, which
+      takes the type and region count, looks up the ops, rejects unknown
+      types, validates the region count (via ``validate_nregions`` or the
+      generic ``xlog_recover_nregions()`` helper) and returns the item or an
+      ERR_PTR(); remove the ops lookup from ``reorder_trans``
+    - Add the generic region/item completion path
+      (``xlog_recover_complete_region()``/``xlog_recover_complete_item()``)
+      that runs ``min_hdr_len``, ``validate_region``, ``validate_item`` and
+      the ``complete`` hook, driven from both region assembly functions
+    - No item type supplies the new field or callbacks yet, so the generic
+      helper is always used and there is no behaviour change beyond the
+      unknown-type rejection moving earlier
 
 Patch 2: Treat the transaction header as a validated region type
     - Add an ops entry for the transaction header keyed on the low 16 bits
@@ -414,12 +435,13 @@ Patch 3: Move item ops lookup to add_to_trans (first region decode)
     - Remove the ops lookup from ``xlog_recover_reorder_trans()`` (it
       becomes a simple NULL check / assertion)
 
-Patch 4: Populate min_regions/max_regions/min_hdr_len for all item types
-    - The three fields were added to ``struct xlog_recover_item_ops`` in
-      Patch 1; populate them for all remaining item types
-    - Add generic checks in ``add_to_trans`` after ops lookup:
-      ``ilf_size >= ops->min_regions && ilf_size <= ops->max_regions``,
-      ``len >= ops->min_hdr_len`` (for non-continuation first regions)
+Patch 4: Populate validate_nregions/min_hdr_len for all item types
+    - The ``min_hdr_len`` field and ``validate_nregions`` callback were added
+      to ``struct xlog_recover_item_ops`` in Patch 1; populate them for all
+      remaining item types (each ``validate_nregions`` enforces the type's
+      region-count range and returns the count)
+    - The generic ``min_hdr_len`` check already runs at region-completion
+      time from Patch 1
 
 Patch 5: Fix generic safety issues
     - ``add_to_cont_trans``: check ``ri_cnt > 0`` and ``ri_buf != NULL``

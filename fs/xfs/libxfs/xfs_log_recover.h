@@ -11,6 +11,7 @@
  * define how recovery should work for that type of log item.
  */
 struct xlog_recover_item;
+struct xlog_recover;
 struct xfs_defer_op_type;
 
 /* Sorting hat for log items as they're read in. */
@@ -23,6 +24,24 @@ enum xlog_recover_reorder {
 
 struct xlog_recover_item_ops {
 	uint16_t	item_type;	/* XFS_LI_* type code. */
+
+	/*
+	 * Minimum valid length of the item's format header (ri_buf[0]). Checked
+	 * as the item is decoded from the journal before the region data is
+	 * trusted. A value of 0 means no minimum header length is enforced.
+	 */
+	uint16_t	min_hdr_len;
+
+	/*
+	 * Validate the region count read from the front of the item's first
+	 * region and return the number of regions to assemble for the item.
+	 * The returned count is used to size ri_buf and to detect item
+	 * completion, so it need not equal the raw on-disk value (the
+	 * transaction header, for example, ignores it and always returns 1).
+	 * Returns a negative error (e.g. -EFSCORRUPTED) if the count is
+	 * invalid. Types that do not supply this use xlog_recover_nregions().
+	 */
+	int (*validate_nregions)(struct xlog *log, uint16_t nregions);
 
 	/*
 	 * Help sort recovered log items into the order required to replay them
@@ -58,7 +77,41 @@ struct xlog_recover_item_ops {
 	 */
 	int (*commit_pass2)(struct xlog *log, struct list_head *buffer_list,
 			    struct xlog_recover_item *item, xfs_lsn_t lsn);
+
+	/*
+	 * Validate a single region of the item once it has been fully
+	 * assembled from the journal.  Called with the index of the region to
+	 * check.  Returns 0 if the region is valid or a negative error (e.g.
+	 * -EFSCORRUPTED) if it is not.  Optional.
+	 */
+	int (*validate_region)(struct xlog *log,
+			       struct xlog_recover_item *item,
+			       int region_index);
+
+	/*
+	 * Validate the whole item once all of its regions have been assembled
+	 * from the journal.  Used for cross-region structural checks that can
+	 * only be done with the complete item.  Returns 0 if the item is valid
+	 * or a negative error (e.g. -EFSCORRUPTED) if it is not.  Optional.
+	 */
+	int (*validate_item)(struct xlog *log,
+			     struct xlog_recover_item *item);
+
+	/*
+	 * Dispose of the item once it has been fully assembled and validated,
+	 * instead of the default of queuing it on the transaction for replay.
+	 * Used by pseudo-items that are consumed during decode rather than
+	 * replayed (e.g. the transaction header, which is copied into the
+	 * transaction).  Returns XLOG_RECOVER_ITEM_CONSUMED if it took
+	 * ownership of the item (the caller then frees it), 0 to fall back to
+	 * the default queuing, or a negative error.  Optional.
+	 */
+	int (*complete)(struct xlog *log, struct xlog_recover *trans,
+			struct xlog_recover_item *item);
 };
+
+/* ->complete() took ownership of the item; do not queue it for replay. */
+#define XLOG_RECOVER_ITEM_CONSUMED	1
 
 extern const struct xlog_recover_item_ops xlog_icreate_item_ops;
 extern const struct xlog_recover_item_ops xlog_buf_item_ops;
