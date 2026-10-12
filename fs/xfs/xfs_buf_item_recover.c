@@ -481,8 +481,6 @@ xlog_recover_do_reg_buffer(
 	int			i;
 	int			bit;
 	int			nbits;
-	xfs_failaddr_t		fa;
-	const size_t		size_disk_dquot = sizeof(struct xfs_disk_dquot);
 
 	trace_xfs_log_recover_buf_reg_buf(mp->m_log, buf_f);
 
@@ -496,39 +494,10 @@ xlog_recover_do_reg_buffer(
 		nbits = xfs_contig_bits(buf_f->blf_data_map,
 					buf_f->blf_map_size, bit);
 
-		/*
-		 * Do a sanity check if this is a dquot buffer. Just checking
-		 * the first dquot in the buffer should do. XXXThis is
-		 * probably a good thing to do for other buf types also.
-		 */
-		fa = NULL;
-		if (buf_f->blf_flags &
-		   (XFS_BLF_UDQUOT_BUF|XFS_BLF_PDQUOT_BUF|XFS_BLF_GDQUOT_BUF)) {
-			if (item->ri_buf[i].iov_base == NULL) {
-				xfs_alert(mp,
-					"XFS: NULL dquot in %s.", __func__);
-				goto next;
-			}
-			if (item->ri_buf[i].iov_len < size_disk_dquot) {
-				xfs_alert(mp,
-					"XFS: dquot too small (%zd) in %s.",
-					item->ri_buf[i].iov_len, __func__);
-				goto next;
-			}
-			fa = xfs_dquot_verify(mp, item->ri_buf[i].iov_base, -1);
-			if (fa) {
-				xfs_alert(mp,
-	"dquot corrupt at %pS trying to replay into block 0x%llx",
-					fa, xfs_buf_daddr(bp));
-				goto next;
-			}
-		}
-
 		memcpy(xfs_buf_offset(bp,
 			(uint)bit << XFS_BLF_SHIFT),	/* dest */
 			item->ri_buf[i].iov_base,		/* source */
 			nbits<<XFS_BLF_SHIFT);		/* length */
- next:
 		i++;
 		bit += nbits;
 	}
@@ -1247,6 +1216,41 @@ xlog_recover_buf_verify_type(
 }
 
 /*
+ * A dquot buffer is only ever logged by xfs_qm_init_dquot_blk(), which
+ * initialises and logs the entire buffer in one go. So a logged dquot buffer
+ * has exactly one data region covering the whole buffer, and that region is a
+ * full chunk of valid dquots. Reject anything else, then verify every dquot in
+ * the logged chunk so a corrupt dquot is not replayed onto disk.
+ */
+static int
+xlog_recover_buf_validate_dquot(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	struct xfs_buf_log_format	*blf)
+{
+	struct xfs_dqblk		*dqb = item->ri_buf[1].iov_base;
+	xfs_failaddr_t			fa;
+	unsigned int			ndquots;
+
+	if (item->ri_total != 2 ||
+	    item->ri_buf[1].iov_len != BBTOB(blf->blf_len)) {
+		xfs_warn(log->l_mp,
+			"BUF: dquot buffer is not a single whole region recovered.");
+		return -EFSCORRUPTED;
+	}
+
+	ndquots = xfs_calc_dquots_per_chunk(blf->blf_len);
+	fa = xfs_dquot_verify_chunk(log->l_mp, &dqb, ndquots);
+	if (fa) {
+		xfs_warn(log->l_mp,
+			"BUF: dquot at %pS failed validation recovered.", fa);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
+/*
  * Validate the whole buffer item once all regions are assembled. The item size
  * must match the number of regions attached. A cancelled buffer is not
  * replayed, so it logs only the format header. Any other buffer must have a
@@ -1345,6 +1349,10 @@ xlog_recover_buf_validate_item(
 
 	if (ri != item->ri_total || total > BBTOB(blf->blf_len))
 		goto bad_map;
+
+	if (blf->blf_flags &
+	    (XFS_BLF_UDQUOT_BUF | XFS_BLF_PDQUOT_BUF | XFS_BLF_GDQUOT_BUF))
+		return xlog_recover_buf_validate_dquot(log, item, blf);
 
 	return 0;
 
