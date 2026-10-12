@@ -35,11 +35,6 @@ xlog_recover_dquot_ra_pass2(
 		return;
 
 	recddq = item->ri_buf[1].iov_base;
-	if (recddq == NULL)
-		return;
-	if (item->ri_buf[1].iov_len < sizeof(struct xfs_disk_dquot))
-		return;
-
 	type = recddq->d_type & XFS_DQTYPE_REC_MASK;
 	ASSERT(type);
 	if (log->l_quotaoffs_flag & type)
@@ -80,15 +75,6 @@ xlog_recover_dquot_commit_pass2(
 		return 0;
 
 	recddq = item->ri_buf[1].iov_base;
-	if (recddq == NULL) {
-		xfs_alert(log->l_mp, "NULL dquot in %s.", __func__);
-		return -EFSCORRUPTED;
-	}
-	if (item->ri_buf[1].iov_len < sizeof(struct xfs_disk_dquot)) {
-		xfs_alert(log->l_mp, "dquot too small (%zd) in %s.",
-			item->ri_buf[1].iov_len, __func__);
-		return -EFSCORRUPTED;
-	}
 
 	/*
 	 * This type of quotas was turned off, so ignore this record.
@@ -109,14 +95,6 @@ xlog_recover_dquot_commit_pass2(
 	 * removed since the last mount - ENOSYS.
 	 */
 	dq_f = item->ri_buf[0].iov_base;
-	ASSERT(dq_f);
-	fa = xfs_dquot_verify(mp, recddq, dq_f->qlf_id);
-	if (fa) {
-		xfs_alert(mp, "corrupt dquot ID 0x%x in log at %pS",
-				dq_f->qlf_id, fa);
-		return -EFSCORRUPTED;
-	}
-	ASSERT(dq_f->qlf_len == 1);
 
 	/*
 	 * At this point we are assuming that the dquots have been allocated
@@ -175,8 +153,86 @@ out_release:
 	return error;
 }
 
+/* A dquot item is a format header region followed by the dquot record. */
+static int
+xlog_recover_dquot_nregions(
+	struct xlog			*log,
+	uint16_t			nregions)
+{
+	if (nregions != 2)
+		return -EFSCORRUPTED;
+	return 2;
+}
+
+static int
+xlog_recover_dquot_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	size_t				len = item->ri_buf[region_index].iov_len;
+	size_t				expected;
+
+	if (region_index == 0)
+		expected = sizeof(struct xfs_dq_logformat);
+	else
+		expected = sizeof(struct xfs_disk_dquot);
+
+	if (len != expected) {
+		xfs_warn(log->l_mp,
+			"DQUOT: bad region %d length %zu recovered.",
+			region_index, len);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
+static int
+xlog_recover_dquot_validate_item(
+	struct xlog			*log,
+	struct xlog_recover_item	*item)
+{
+	struct xfs_mount		*mp = log->l_mp;
+	struct xfs_dq_logformat		*dq_f = item->ri_buf[0].iov_base;
+	struct xfs_disk_dquot		*ddq = item->ri_buf[1].iov_base;
+	xfs_failaddr_t			fa;
+
+	if (dq_f->qlf_len != XFS_DQUOT_CLUSTER_SIZE_FSB) {
+		xfs_warn(mp, "DQUOT: bad buffer length %d recovered.",
+				dq_f->qlf_len);
+		return -EFSCORRUPTED;
+	}
+
+	if (dq_f->qlf_boffset + sizeof(struct xfs_dqblk) >
+			XFS_FSB_TO_B(mp, XFS_DQUOT_CLUSTER_SIZE_FSB)) {
+		xfs_warn(mp, "DQUOT: bad buffer offset %u recovered.",
+				dq_f->qlf_boffset);
+		return -EFSCORRUPTED;
+	}
+
+	if (!xfs_verify_fsbno(mp, XFS_DADDR_TO_FSB(mp, dq_f->qlf_blkno))) {
+		xfs_warn(mp, "DQUOT: bad buffer block 0x%llx recovered.",
+				dq_f->qlf_blkno);
+		return -EFSCORRUPTED;
+	}
+
+	fa = xfs_dquot_verify(mp, ddq, dq_f->qlf_id);
+	if (fa) {
+		xfs_warn(mp, "DQUOT: dquot id 0x%x failed validation at %pS",
+				dq_f->qlf_id, fa);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
 const struct xlog_recover_item_ops xlog_dquot_item_ops = {
 	.item_type		= XFS_LI_DQUOT,
+	.min_hdr_len		= sizeof(struct xfs_dq_logformat),
+	.validate_nregions	= xlog_recover_dquot_nregions,
+	.validate_region	= xlog_recover_dquot_validate_region,
+	.validate_item		= xlog_recover_dquot_validate_item,
 	.ra_pass2		= xlog_recover_dquot_ra_pass2,
 	.commit_pass2		= xlog_recover_dquot_commit_pass2,
 };
