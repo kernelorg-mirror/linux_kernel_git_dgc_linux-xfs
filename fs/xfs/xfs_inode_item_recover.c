@@ -441,6 +441,128 @@ xlog_dinode_verify(
 	return NULL;
 }
 
+/*
+ * Verify the logged data fork against the core and the fork region that carries
+ * it. The core has already been verified, so the mode and fork offset can be
+ * trusted here. The data fork format must be valid for the inode mode, whether
+ * or not the fork was logged. A regular file has no local format data fork. If
+ * the fork was logged, the field logged for it must match that format, and the
+ * region holding it must be the size the format header records. A local or
+ * extents fork is copied verbatim into the inode fork, so it must also fit
+ * within the space the fork offset leaves for it. A btree fork is logged in the
+ * larger expanded form and compressed into the fork on replay, so it does not
+ * get the fit check. The contents of the region are not inspected.
+ */
+static xfs_failaddr_t
+xlog_dinode_verify_dfork(
+	struct xfs_mount		*mp,
+	struct xfs_log_dinode		*ldip,
+	struct xfs_inode_log_format	*ilfp,
+	struct xlog_recover_item	*item)
+{
+	unsigned int			field = ilfp->ilf_fields & XFS_ILOG_DFORK;
+	unsigned int			fork_size;
+
+	switch (ldip->di_format) {
+	case XFS_DINODE_FMT_LOCAL:
+		if (S_ISREG(ldip->di_mode))
+			return __this_address;
+		break;
+	case XFS_DINODE_FMT_EXTENTS:
+	case XFS_DINODE_FMT_BTREE:
+	case XFS_DINODE_FMT_META_BTREE:
+		break;
+	default:
+		return __this_address;
+	}
+
+	if (!field)
+		return NULL;
+
+	if (item->ri_buf[2].iov_len != xlog_calc_iovec_len(ilfp->ilf_dsize))
+		return __this_address;
+
+	fork_size = __xfs_inode_fork_size(mp, ldip->di_forkoff, XFS_DATA_FORK);
+
+	switch (ldip->di_format) {
+	case XFS_DINODE_FMT_LOCAL:
+		if (field != XFS_ILOG_DDATA)
+			return __this_address;
+		if (ilfp->ilf_dsize > fork_size)
+			return __this_address;
+		break;
+	case XFS_DINODE_FMT_EXTENTS:
+		if (field != XFS_ILOG_DEXT)
+			return __this_address;
+		if (ilfp->ilf_dsize > fork_size)
+			return __this_address;
+		break;
+	case XFS_DINODE_FMT_BTREE:
+	case XFS_DINODE_FMT_META_BTREE:
+		if (field != XFS_ILOG_DBROOT)
+			return __this_address;
+		break;
+	}
+
+	return NULL;
+}
+
+/*
+ * Verify the logged attribute fork against the core and the fork region that
+ * carries it, as for the data fork. The attribute fork has no local device or
+ * metadata btree format.
+ */
+static xfs_failaddr_t
+xlog_dinode_verify_afork(
+	struct xfs_mount		*mp,
+	struct xfs_log_dinode		*ldip,
+	struct xfs_inode_log_format	*ilfp,
+	struct xlog_recover_item	*item)
+{
+	unsigned int			field = ilfp->ilf_fields & XFS_ILOG_AFORK;
+	unsigned int			fork_size;
+	unsigned int			region;
+
+	switch (ldip->di_aformat) {
+	case XFS_DINODE_FMT_LOCAL:
+	case XFS_DINODE_FMT_EXTENTS:
+	case XFS_DINODE_FMT_BTREE:
+		break;
+	default:
+		return __this_address;
+	}
+
+	if (!field)
+		return NULL;
+
+	region = (ilfp->ilf_fields & XFS_ILOG_DFORK) ? 3 : 2;
+	if (item->ri_buf[region].iov_len != xlog_calc_iovec_len(ilfp->ilf_asize))
+		return __this_address;
+
+	fork_size = __xfs_inode_fork_size(mp, ldip->di_forkoff, XFS_ATTR_FORK);
+
+	switch (ldip->di_aformat) {
+	case XFS_DINODE_FMT_LOCAL:
+		if (field != XFS_ILOG_ADATA)
+			return __this_address;
+		if (ilfp->ilf_asize > fork_size)
+			return __this_address;
+		break;
+	case XFS_DINODE_FMT_EXTENTS:
+		if (field != XFS_ILOG_AEXT)
+			return __this_address;
+		if (ilfp->ilf_asize > fork_size)
+			return __this_address;
+		break;
+	case XFS_DINODE_FMT_BTREE:
+		if (field != XFS_ILOG_ABROOT)
+			return __this_address;
+		break;
+	}
+
+	return NULL;
+}
+
 static inline int
 xlog_recover_inode_dbroot(
 	struct xfs_mount	*mp,
@@ -677,6 +799,36 @@ xlog_recover_inode_validate_item(
 		return -EFSCORRUPTED;
 	}
 
+	/*
+	 * A device inode holds its rdev in the format header and logs no data
+	 * fork region. Any other inode has its logged data fork verified against
+	 * the core and the fork offset.
+	 */
+	if (ldip->di_format == XFS_DINODE_FMT_DEV) {
+		if (ilfp->ilf_fields & XFS_ILOG_DFORK) {
+			xfs_warn(log->l_mp,
+				"INODE: device inode 0x%llx logged a data fork.",
+				ilfp->ilf_ino);
+			return -EFSCORRUPTED;
+		}
+	} else {
+		fa = xlog_dinode_verify_dfork(log->l_mp, ldip, ilfp, item);
+		if (fa) {
+			xfs_warn(log->l_mp,
+				"INODE: inode 0x%llx logged data fork failed validation at %pS",
+				ilfp->ilf_ino, fa);
+			return -EFSCORRUPTED;
+		}
+	}
+
+	fa = xlog_dinode_verify_afork(log->l_mp, ldip, ilfp, item);
+	if (fa) {
+		xfs_warn(log->l_mp,
+			"INODE: inode 0x%llx logged attr fork failed validation at %pS",
+			ilfp->ilf_ino, fa);
+		return -EFSCORRUPTED;
+	}
+
 	return 0;
 }
 
@@ -792,10 +944,6 @@ xlog_recover_inode_commit_pass2(
 		goto out_owner_change;
 	len = item->ri_buf[2].iov_len;
 	src = item->ri_buf[2].iov_base;
-	ASSERT(in_f->ilf_size <= 4);
-	ASSERT((in_f->ilf_size == 3) || (fields & XFS_ILOG_AFORK));
-	ASSERT(!(fields & XFS_ILOG_DFORK) ||
-	       (len == xlog_calc_iovec_len(in_f->ilf_dsize)));
 
 	/*
 	 * The recovered inode is verified only after the fork data has been
@@ -829,10 +977,7 @@ xlog_recover_inode_commit_pass2(
 		break;
 
 	default:
-		/*
-		 * There are no data fork flags set.
-		 */
-		ASSERT((fields & XFS_ILOG_DFORK) == 0);
+		/* No data fork was logged. */
 		break;
 	}
 
@@ -849,7 +994,6 @@ xlog_recover_inode_commit_pass2(
 		}
 		len = item->ri_buf[attr_index].iov_len;
 		src = item->ri_buf[attr_index].iov_base;
-		ASSERT(len == xlog_calc_iovec_len(in_f->ilf_asize));
 
 		switch (in_f->ilf_fields & XFS_ILOG_AFORK) {
 		case XFS_ILOG_ADATA:
@@ -864,12 +1008,6 @@ xlog_recover_inode_commit_pass2(
 					 len, (struct xfs_bmdr_block *)dest,
 					 XFS_DFORK_ASIZE(dip, mp));
 			break;
-
-		default:
-			xfs_warn(log->l_mp, "%s: Invalid flag", __func__);
-			ASSERT(0);
-			error = -EFSCORRUPTED;
-			goto out_release;
 		}
 	}
 

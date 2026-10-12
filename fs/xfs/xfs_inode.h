@@ -135,19 +135,39 @@ static inline unsigned int xfs_inode_fork_boff(struct xfs_inode *ip)
 	return ip->i_forkoff << 3;
 }
 
+/*
+ * Space available to a fork given the inode's fork offset. The on-disk, logged
+ * and in-memory inodes all express the fork offset the same way, so share this
+ * calculation through a scalar helper.
+ */
+static inline unsigned int
+__xfs_inode_fork_size(
+	struct xfs_mount	*mp,
+	uint8_t			forkoff,
+	int			whichfork)
+{
+	unsigned int		boff = forkoff << 3;
+
+	switch (whichfork) {
+	case XFS_DATA_FORK:
+		return forkoff ? boff : XFS_LITINO(mp);
+	case XFS_ATTR_FORK:
+		return forkoff ? XFS_LITINO(mp) - boff : 0;
+	default:
+		return 0;
+	}
+}
+
 static inline unsigned int xfs_inode_data_fork_size(struct xfs_inode *ip)
 {
-	if (xfs_inode_has_attr_fork(ip))
-		return xfs_inode_fork_boff(ip);
-
-	return XFS_LITINO(ip->i_mount);
+	return __xfs_inode_fork_size(ip->i_mount, ip->i_forkoff,
+			XFS_DATA_FORK);
 }
 
 static inline unsigned int xfs_inode_attr_fork_size(struct xfs_inode *ip)
 {
-	if (xfs_inode_has_attr_fork(ip))
-		return XFS_LITINO(ip->i_mount) - xfs_inode_fork_boff(ip);
-	return 0;
+	return __xfs_inode_fork_size(ip->i_mount, ip->i_forkoff,
+			XFS_ATTR_FORK);
 }
 
 static inline unsigned int
@@ -155,14 +175,7 @@ xfs_inode_fork_size(
 	struct xfs_inode	*ip,
 	int			whichfork)
 {
-	switch (whichfork) {
-	case XFS_DATA_FORK:
-		return xfs_inode_data_fork_size(ip);
-	case XFS_ATTR_FORK:
-		return xfs_inode_attr_fork_size(ip);
-	default:
-		return 0;
-	}
+	return __xfs_inode_fork_size(ip->i_mount, ip->i_forkoff, whichfork);
 }
 
 /* Convert from vfs inode to xfs inode */

@@ -1099,13 +1099,11 @@ enum xfs_dinode_fmt {
 #define XFS_DFORK_BOFF(dip)		((int)((dip)->di_forkoff << 3))
 
 #define XFS_DFORK_DSIZE(dip,mp) \
-	((dip)->di_forkoff ? XFS_DFORK_BOFF(dip) : XFS_LITINO(mp))
+	__xfs_inode_fork_size(mp, (dip)->di_forkoff, XFS_DATA_FORK)
 #define XFS_DFORK_ASIZE(dip,mp) \
-	((dip)->di_forkoff ? XFS_LITINO(mp) - XFS_DFORK_BOFF(dip) : 0)
+	__xfs_inode_fork_size(mp, (dip)->di_forkoff, XFS_ATTR_FORK)
 #define XFS_DFORK_SIZE(dip,mp,w) \
-	((w) == XFS_DATA_FORK ? \
-		XFS_DFORK_DSIZE(dip, mp) : \
-		XFS_DFORK_ASIZE(dip, mp))
+	__xfs_inode_fork_size(mp, (dip)->di_forkoff, w)
 
 #define XFS_DFORK_MAXEXT(dip, mp, w) \
 	(XFS_DFORK_SIZE(dip, mp, w) / sizeof(struct xfs_bmbt_rec))
