@@ -513,23 +513,10 @@ xfs_refcount_recover_work(
 	int				i;
 	int				error = 0;
 
-	/*
-	 * First check the validity of the extents described by the
-	 * CUI.  If any are bad, then assume that all are bad and
-	 * just toss the CUI.
-	 */
-	for (i = 0; i < cuip->cui_format.cui_nextents; i++) {
-		if (!xfs_cui_validate_phys(mp, isrt,
-					&cuip->cui_format.cui_extents[i])) {
-			XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-					&cuip->cui_format,
-					sizeof(cuip->cui_format));
-			return -EFSCORRUPTED;
-		}
-
+	/* The extents were validated when the cui was recovered. */
+	for (i = 0; i < cuip->cui_format.cui_nextents; i++)
 		xfs_cui_recover_work(mp, dfp, isrt,
 				&cuip->cui_format.cui_extents[i]);
-	}
 
 	/*
 	 * Under normal operation, refcount updates are deferred, so we
@@ -717,22 +704,8 @@ xlog_recover_cui_commit_pass2(
 	struct xfs_mount		*mp = log->l_mp;
 	struct xfs_cui_log_item		*cuip;
 	struct xfs_cui_log_format	*cui_formatp;
-	size_t				len;
 
 	cui_formatp = item->ri_buf[0].iov_base;
-
-	if (item->ri_buf[0].iov_len < xfs_cui_log_format_sizeof(0)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
-
-	len = xfs_cui_log_format_sizeof(cui_formatp->cui_nextents);
-	if (item->ri_buf[0].iov_len != len) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
 
 	cuip = xfs_cui_init(mp, ITEM_TYPE(item), cui_formatp->cui_nextents);
 	xfs_cui_copy_format(&cuip->cui_format, cui_formatp);
@@ -743,8 +716,80 @@ xlog_recover_cui_commit_pass2(
 	return 0;
 }
 
+/*
+ * The cui is a single region whose length must match its extent count. The
+ * refcount phys extent has fixed width fields, so there is a single on-disk
+ * format. This is shared by the data and realtime cui items, which have
+ * identical formats.
+ */
+static int
+xlog_recover_cui_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	struct xfs_cui_log_format	*cui_formatp =
+		item->ri_buf[region_index].iov_base;
+	size_t				len = item->ri_buf[region_index].iov_len;
+	uint32_t			nextents;
+
+	if (len < xfs_cui_log_format_sizeof(0)) {
+		xfs_warn(log->l_mp, "CUI: bad item region length %zu recovered.",
+				len);
+		return -EFSCORRUPTED;
+	}
+
+	/*
+	 * Bound the extent count before the exact size check below so a corrupt
+	 * count cannot overflow the size calculation. This limit is a fuzzy
+	 * upper bound to prevent overflow; the size check that follows enforces
+	 * the precise length.
+	 */
+	nextents = cui_formatp->cui_nextents;
+	if (nextents == 0 ||
+	    nextents > XLOG_MAX_REGION_SIZE / sizeof(struct xfs_phys_extent)) {
+		xfs_warn(log->l_mp, "CUI: bad extent count %u recovered.",
+				nextents);
+		return -EFSCORRUPTED;
+	}
+
+	if (len != xfs_cui_log_format_sizeof(nextents)) {
+		xfs_warn(log->l_mp,
+			"CUI: item region length %zu does not match %u extents recovered.",
+			len, nextents);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
+/* Validate the refcount update extents in the cui. */
+static int
+xlog_recover_cui_validate_item(
+	struct xlog			*log,
+	struct xlog_recover_item	*item)
+{
+	struct xfs_cui_log_format	*cui_formatp = item->ri_buf[0].iov_base;
+	bool				isrt = ITEM_TYPE(item) == XFS_LI_CUI_RT;
+	uint32_t			i;
+
+	for (i = 0; i < cui_formatp->cui_nextents; i++) {
+		if (!xfs_cui_validate_phys(log->l_mp, isrt,
+					&cui_formatp->cui_extents[i])) {
+			xfs_warn(log->l_mp, "CUI: bad extent %u recovered.", i);
+			return -EFSCORRUPTED;
+		}
+	}
+
+	return 0;
+}
+
 const struct xlog_recover_item_ops xlog_cui_item_ops = {
 	.item_type		= XFS_LI_CUI,
+	.min_hdr_len		= sizeof(struct xfs_cui_log_format),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_cui_validate_region,
+	.validate_item		= xlog_recover_cui_validate_item,
 	.commit_pass2		= xlog_recover_cui_commit_pass2,
 };
 
@@ -759,22 +804,8 @@ xlog_recover_rtcui_commit_pass2(
 	struct xfs_mount		*mp = log->l_mp;
 	struct xfs_cui_log_item		*cuip;
 	struct xfs_cui_log_format	*cui_formatp;
-	size_t				len;
 
 	cui_formatp = item->ri_buf[0].iov_base;
-
-	if (item->ri_buf[0].iov_len < xfs_cui_log_format_sizeof(0)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
-
-	len = xfs_cui_log_format_sizeof(cui_formatp->cui_nextents);
-	if (item->ri_buf[0].iov_len != len) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
 
 	cuip = xfs_cui_init(mp, ITEM_TYPE(item), cui_formatp->cui_nextents);
 	xfs_cui_copy_format(&cuip->cui_format, cui_formatp);
@@ -800,6 +831,10 @@ xlog_recover_rtcui_commit_pass2(
 
 const struct xlog_recover_item_ops xlog_rtcui_item_ops = {
 	.item_type		= XFS_LI_CUI_RT,
+	.min_hdr_len		= sizeof(struct xfs_cui_log_format),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_cui_validate_region,
+	.validate_item		= xlog_recover_cui_validate_item,
 	.commit_pass2		= xlog_recover_rtcui_commit_pass2,
 };
 
