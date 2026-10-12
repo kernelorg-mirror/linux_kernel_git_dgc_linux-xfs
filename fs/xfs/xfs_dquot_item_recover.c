@@ -208,8 +208,26 @@ xlog_recover_quotaoff_commit_pass1(
 	return 0;
 }
 
+static int
+xlog_recover_quotaoff_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	if (item->ri_buf[region_index].iov_len !=
+			sizeof(struct xfs_qoff_logformat)) {
+		xfs_warn(log->l_mp, "QOFF: bad item region length %zu recovered.",
+				item->ri_buf[region_index].iov_len);
+		return -EFSCORRUPTED;
+	}
+	return 0;
+}
+
 const struct xlog_recover_item_ops xlog_quotaoff_item_ops = {
 	.item_type		= XFS_LI_QUOTAOFF,
+	.min_hdr_len		= sizeof(struct xfs_qoff_logformat),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_quotaoff_validate_region,
 	.commit_pass1		= xlog_recover_quotaoff_commit_pass1,
 	/* nothing to commit in pass2 */
 };

@@ -2224,12 +2224,23 @@ xlog_recover_nregions(
 	struct xlog		*log,
 	uint16_t		nregions)
 {
-	if (nregions == 0 || nregions > XLOG_MAX_REGIONS_IN_ITEM) {
-		xfs_warn(log->l_mp,
-	"bad number of regions (%d) in inode log format", nregions);
+	if (nregions == 0 || nregions > XLOG_MAX_REGIONS_IN_ITEM)
 		return -EFSCORRUPTED;
-	}
 	return nregions;
+}
+
+/*
+ * ->validate_nregions() helper for the many item types that are made up of a
+ * single region.
+ */
+int
+xlog_recover_single_region(
+	struct xlog		*log,
+	uint16_t		nregions)
+{
+	if (nregions != 1)
+		return -EFSCORRUPTED;
+	return 1;
 }
 
 /*
@@ -2271,8 +2282,12 @@ xlog_recover_add_item(
 		valid_nregions = ops->validate_nregions(log, nregions);
 	else
 		valid_nregions = xlog_recover_nregions(log, nregions);
-	if (valid_nregions < 0)
+	if (valid_nregions < 0) {
+		xfs_warn(log->l_mp,
+			"%s: bad region count %u for log item type 0x%x",
+			__func__, nregions, item_type);
 		return ERR_PTR(valid_nregions);
+	}
 
 	item = kzalloc_obj(struct xlog_recover_item, GFP_KERNEL | __GFP_NOFAIL);
 	INIT_LIST_HEAD(&item->ri_list);

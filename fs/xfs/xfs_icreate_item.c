@@ -253,8 +253,26 @@ xlog_recover_icreate_commit_pass2(
 				     length, be32_to_cpu(icl->icl_gen));
 }
 
+static int
+xlog_recover_icreate_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	if (item->ri_buf[region_index].iov_len !=
+			sizeof(struct xfs_icreate_log)) {
+		xfs_warn(log->l_mp, "ICR: bad item region length %zu recovered.",
+				item->ri_buf[region_index].iov_len);
+		return -EFSCORRUPTED;
+	}
+	return 0;
+}
+
 const struct xlog_recover_item_ops xlog_icreate_item_ops = {
 	.item_type		= XFS_LI_ICREATE,
+	.min_hdr_len		= sizeof(struct xfs_icreate_log),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_icreate_validate_region,
 	.reorder		= xlog_recover_icreate_reorder,
 	.commit_pass2		= xlog_recover_icreate_commit_pass2,
 };
