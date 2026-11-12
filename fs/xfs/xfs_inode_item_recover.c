@@ -478,8 +478,8 @@ xlog_dinode_verify_extents(
  * length is fixed by the record count, so the region size fixes how many
  * records the root can hold.
  *
- * The region size has already been bounds checked against the inode fork size,
- * so it is known to fit within the fork and does not need rechecking here.
+ * The logged root is converted to the compact on-disk root when it is replayed
+ * into the inode, so it is the compact form that must fit within the fork.
  */
 static xfs_failaddr_t
 xlog_dinode_verify_bmbt_root(
@@ -513,6 +513,10 @@ xlog_dinode_verify_bmbt_root(
 	/* The record count must be non-zero and exactly fill the region. */
 	numrecs = be16_to_cpu(block->bb_numrecs);
 	if (numrecs == 0 || size != xfs_bmap_broot_space_calc(mp, numrecs))
+		return __this_address;
+
+	if (xfs_bmdr_space_calc(numrecs) >
+	    __xfs_inode_fork_size(mp, ldip->di_forkoff, whichfork))
 		return __this_address;
 
 	for (i = 1; i <= numrecs; i++) {
@@ -576,6 +580,11 @@ xlog_dinode_verify_rtrmap_root(
 		return __this_address;
 
 	if (size != xfs_rtrmap_broot_space_calc(level, numrecs))
+		return __this_address;
+
+	/* The compact on-disk form of the root must fit within the fork. */
+	if (xfs_rtrmap_droot_space_calc(level, numrecs) >
+	    __xfs_inode_fork_size(mp, ldip->di_forkoff, XFS_DATA_FORK))
 		return __this_address;
 
 	/*
@@ -644,6 +653,11 @@ xlog_dinode_verify_rtrefcount_root(
 		return __this_address;
 
 	if (size != xfs_rtrefcount_broot_space_calc(level, numrecs))
+		return __this_address;
+
+	/* The compact on-disk form of the root must fit within the fork. */
+	if (xfs_rtrefcount_droot_space_calc(level, numrecs) >
+	    __xfs_inode_fork_size(mp, ldip->di_forkoff, XFS_DATA_FORK))
 		return __this_address;
 
 	/*
