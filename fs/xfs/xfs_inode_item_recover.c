@@ -21,6 +21,8 @@
 #include "xfs_log_priv.h"
 #include "xfs_log_recover.h"
 #include "xfs_icache.h"
+#include "xfs_ialloc.h"
+#include "xfs_ag.h"
 #include "xfs_bmap_btree.h"
 #include "xfs_rtrmap_btree.h"
 #include "xfs_rtrefcount_btree.h"
@@ -343,27 +345,182 @@ xlog_recover_inode_validate_region(
  * format. A header already in host format is left in place.
  */
 static int
-xlog_recover_inode_validate_item(
-	struct xlog			*log,
+xlog_recover_inode_convert_format(
 	struct xlog_recover_item	*item)
 {
-	struct xfs_inode_log_format	*in_f;
+	struct xfs_inode_log_format	*ilfp;
 	int				error;
 
 	if (item->ri_buf[0].iov_len == sizeof(struct xfs_inode_log_format))
 		return 0;
 
-	in_f = kzalloc_obj(struct xfs_inode_log_format, GFP_KERNEL | __GFP_NOFAIL);
-	error = xfs_inode_item_format_convert(&item->ri_buf[0], in_f);
+	ilfp = kzalloc_obj(struct xfs_inode_log_format, GFP_KERNEL | __GFP_NOFAIL);
+	error = xfs_inode_item_format_convert(&item->ri_buf[0], ilfp);
 	if (error) {
-		kfree(in_f);
+		kfree(ilfp);
 		return error;
 	}
 
 	kvfree(item->ri_buf[0].iov_base);
-	item->ri_buf[0].iov_base = in_f;
+	item->ri_buf[0].iov_base = ilfp;
 	item->ri_buf[0].iov_len = sizeof(struct xfs_inode_log_format);
 	return 0;
+}
+
+/*
+ * The inode number fixes the filesystem block holding the inode and the inode's
+ * offset within that block. The logged buffer offset and block must agree with
+ * those, and the inode must lie entirely within the cluster buffer.
+ *
+ * Where the cluster starts relative to the inode's block depends on the inode
+ * chunk alignment. For most geometries that is resolvable by arithmetic, and the
+ * exact location is checked. Otherwise it needs an inode btree lookup, which
+ * cannot be run this early in recovery, so the cluster boundary is not checked.
+ */
+static int
+xlog_recover_inode_check_location(
+	struct xlog			*log,
+	struct xfs_inode_log_format	*ilfp)
+{
+	struct xfs_mount		*mp = log->l_mp;
+	xfs_agnumber_t			agno = XFS_INO_TO_AGNO(mp, ilfp->ilf_ino);
+	xfs_agblock_t			agbno = XFS_AGINO_TO_AGBNO(mp,
+						XFS_INO_TO_AGINO(mp, ilfp->ilf_ino));
+	unsigned int			ioffset = XFS_INO_TO_OFFSET(mp,
+						ilfp->ilf_ino) << mp->m_sb.sb_inodelog;
+	struct xfs_perag		*pag;
+	struct xfs_imap			imap;
+	xfs_daddr_t			blkno;
+	unsigned int			start;
+	unsigned int			end;
+	int				len;
+	int				error;
+
+	len = XFS_FSB_TO_BB(mp, M_IGEO(mp)->blocks_per_cluster);
+	if (ilfp->ilf_len != len) {
+		xfs_warn(mp,
+			"INODE: inode 0x%llx buffer length 0x%x does not match expected 0x%x recovered.",
+			ilfp->ilf_ino, ilfp->ilf_len, len);
+		return -EFSCORRUPTED;
+	}
+
+	/* The inode must lie entirely within the cluster buffer. */
+	if (ilfp->ilf_boffset < 0) {
+		xfs_warn(mp,
+			"INODE: inode 0x%llx bad buffer offset %d recovered.",
+			ilfp->ilf_ino, ilfp->ilf_boffset);
+		return -EFSCORRUPTED;
+	}
+	start = ilfp->ilf_boffset;
+	end = start + mp->m_sb.sb_inodesize;
+	if (end > BBTOB(ilfp->ilf_len)) {
+		xfs_warn(mp,
+			"INODE: inode 0x%llx at buffer offset 0x%x overruns buffer size 0x%x recovered.",
+			ilfp->ilf_ino, start, BBTOB(ilfp->ilf_len));
+		return -EFSCORRUPTED;
+	}
+
+	/* The offset within the inode's block is fixed by the inode number. */
+	if ((start & mp->m_blockmask) != ioffset) {
+		xfs_warn(mp,
+			"INODE: inode 0x%llx buffer offset 0x%x does not match offset 0x%x in its block recovered.",
+			ilfp->ilf_ino, start, ioffset);
+		return -EFSCORRUPTED;
+	}
+
+	/*
+	 * The block part of the buffer offset, counted back from the inode's
+	 * block, must land on the start of the cluster buffer.
+	 */
+	blkno = XFS_AGB_TO_DADDR(mp, agno, agbno) -
+			XFS_FSB_TO_BB(mp, start >> mp->m_sb.sb_blocklog);
+	if (ilfp->ilf_blkno != blkno) {
+		xfs_warn(mp,
+			"INODE: inode 0x%llx buffer block 0x%llx does not match expected 0x%llx recovered.",
+			ilfp->ilf_ino, ilfp->ilf_blkno, blkno);
+		return -EFSCORRUPTED;
+	}
+
+	pag = xfs_perag_get(mp, agno);
+	error = xfs_imap(pag, NULL, ilfp->ilf_ino, &imap, XFS_IMAP_NO_LOOKUP);
+	xfs_perag_put(pag);
+	if (error == -EAGAIN)
+		return 0;
+	if (error)
+		return error;
+
+	/* The geometry is resolvable, so check the exact cluster location. */
+	blkno = XFS_AGB_TO_DADDR(mp, agno, imap.im_agbno);
+	if (ilfp->ilf_blkno != blkno) {
+		xfs_warn(mp,
+			"INODE: inode 0x%llx buffer block 0x%llx does not match expected 0x%llx recovered.",
+			ilfp->ilf_ino, ilfp->ilf_blkno, blkno);
+		return -EFSCORRUPTED;
+	}
+	if (ilfp->ilf_boffset != imap.im_boffset) {
+		xfs_warn(mp,
+			"INODE: inode 0x%llx buffer offset 0x%x does not match expected 0x%x recovered.",
+			ilfp->ilf_ino, ilfp->ilf_boffset, imap.im_boffset);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
+/*
+ * Validate the format header once it is in host format. The item size records
+ * how many regions the item should have, the set of logged fields fixes what
+ * that count must be, and the inode number fixes the buffer location, so all of
+ * these are checked against the header here.
+ */
+static int
+xlog_recover_inode_validate_item(
+	struct xlog			*log,
+	struct xlog_recover_item	*item)
+{
+	struct xfs_inode_log_format	*ilfp;
+	unsigned int			nregions;
+	int				error;
+
+	error = xlog_recover_inode_convert_format(item);
+	if (error)
+		return error;
+	ilfp = item->ri_buf[0].iov_base;
+
+	if (!xfs_verify_ino(log->l_mp, ilfp->ilf_ino)) {
+		xfs_warn(log->l_mp, "INODE: bad inode number 0x%llx recovered.",
+				ilfp->ilf_ino);
+		return -EFSCORRUPTED;
+	}
+
+	if (!(ilfp->ilf_fields & XFS_ILOG_CORE)) {
+		xfs_warn(log->l_mp,
+			"INODE: inode 0x%llx has no core logged, fields 0x%x recovered.",
+			ilfp->ilf_ino, ilfp->ilf_fields);
+		return -EFSCORRUPTED;
+	}
+
+	if (ilfp->ilf_size != item->ri_total) {
+		xfs_warn(log->l_mp,
+			"INODE: inode 0x%llx item size %u does not match region count %u recovered.",
+			ilfp->ilf_ino, ilfp->ilf_size, item->ri_total);
+		return -EFSCORRUPTED;
+	}
+
+	nregions = 2;
+	if (ilfp->ilf_fields & XFS_ILOG_DFORK)
+		nregions++;
+	if (ilfp->ilf_fields & XFS_ILOG_AFORK)
+		nregions++;
+	if (ilfp->ilf_size != nregions) {
+		xfs_warn(log->l_mp,
+			"INODE: inode 0x%llx item size %u does not match region count %u the fields 0x%x define.",
+			ilfp->ilf_ino, ilfp->ilf_size, nregions,
+			ilfp->ilf_fields);
+		return -EFSCORRUPTED;
+	}
+
+	return xlog_recover_inode_check_location(log, ilfp);
 }
 
 STATIC int
