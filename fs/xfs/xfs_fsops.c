@@ -226,6 +226,7 @@ xfs_growfs_data_private(
 		/* Compute new maxlevels for rt btrees. */
 		xfs_rtrmapbt_compute_maxlevels(mp);
 		xfs_rtrefcountbt_compute_maxlevels(mp);
+		xfs_rtbtree_compute_maxlevels(mp);
 	}
 
 	return error;

@@ -833,15 +833,6 @@ set_limit:
 	return 0;
 }
 
-/* Compute maximum possible height for realtime btree types for this fs. */
-static inline void
-xfs_rtbtree_compute_maxlevels(
-	struct xfs_mount	*mp)
-{
-	mp->m_rtbtree_maxlevels = max(mp->m_rtrmap_maxlevels,
-				      mp->m_rtrefc_maxlevels);
-}
-
 /*
  * This function does the following on an initial mount of a file system:
  *	- reads the superblock from disk and init the mount struct
