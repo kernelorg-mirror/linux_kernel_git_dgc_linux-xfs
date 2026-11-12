@@ -969,8 +969,13 @@ xrep_dinode_bad_rtrmapbt_fork(
 	nrecs = be16_to_cpu(dfp->bb_numrecs);
 	level = be16_to_cpu(dfp->bb_level);
 
-	if (level > sc->mp->m_rtrmap_maxlevels)
+	/* Same root level rules as xfs_iformat_rtrmap(). */
+	if (level == 0) {
+		if (sc->mp->m_rtrmap_maxlevels == 0 && nrecs != 0)
+			return true;
+	} else if (level >= sc->mp->m_rtrmap_maxlevels) {
 		return true;
+	}
 	if (xfs_rtrmap_droot_space_calc(level, nrecs) > dfork_size)
 		return true;
 	if (level > 0 && nrecs == 0)

@@ -140,7 +140,7 @@ xfs_rtrmapbt_verify(
 	if (fa)
 		return fa;
 	level = be16_to_cpu(block->bb_level);
-	if (level > mp->m_rtrmap_maxlevels)
+	if (level >= mp->m_rtrmap_maxlevels)
 		return __this_address;
 
 	return xfs_btree_fsblock_verify(bp, mp->m_rtrmap_mxr[level != 0]);
@@ -692,17 +692,36 @@ xfs_iformat_rtrmap(
 	numrecs = be16_to_cpu(dfp->bb_numrecs);
 	level = be16_to_cpu(dfp->bb_level);
 
-	if (level > mp->m_rtrmap_maxlevels ||
-	    xfs_rtrmap_droot_space_calc(level, numrecs) > dsize) {
-		xfs_inode_mark_sick(ip, XFS_SICK_INO_CORE);
-		return -EFSCORRUPTED;
+	if (level == 0) {
+		/*
+		 * rtrmap inodes can be dynamically created by growfs, resulting
+		 * in a transient state on disk where they can have no contents.
+		 * Hence a rtrmap inode with an empty level zero root is a valid
+		 * state. Until growfs adds the first realtime volume there is
+		 * nothing to map, so the root must be empty.
+		 */
+		if (mp->m_rtrmap_maxlevels == 0 && numrecs != 0)
+			goto out_corrupt;
+	} else if (level >= mp->m_rtrmap_maxlevels) {
+		/*
+		 * m_rtrmap_maxlevels includes the inode root level, so the
+		 * deepest valid root level is one less than that.
+		 */
+		goto out_corrupt;
 	}
+
+	if (xfs_rtrmap_droot_space_calc(level, numrecs) > dsize)
+		goto out_corrupt;
 
 	broot = xfs_broot_alloc(xfs_ifork_ptr(ip, XFS_DATA_FORK),
 			xfs_rtrmap_broot_space_calc(level, numrecs));
 	if (broot)
 		xfs_rtrmapbt_from_disk(ip, dfp, dsize, broot);
 	return 0;
+
+out_corrupt:
+	xfs_inode_mark_sick(ip, XFS_SICK_INO_CORE);
+	return -EFSCORRUPTED;
 }
 
 /* Convert in-memory form of btree root to on-disk form. */
