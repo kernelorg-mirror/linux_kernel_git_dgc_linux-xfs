@@ -204,6 +204,13 @@ xrep_dinode_buf_core(
 	if (!unlinked_ok)
 		dip->di_next_unlinked = cpu_to_be32(NULLAGINO);
 	xfs_dinode_calc_crc(mp, dip);
+
+	/*
+	 * We don't mark the buffer with xfs_trans_inode_buf() as that would
+	 * cause recovery to only replay unlinked list pointers. However, we
+	 * still need to set the buffer type for recovery to correctly classify
+	 * it as an inode buffer.
+	 */
 	xfs_trans_buf_set_type(tp, bp, XFS_BLFT_DINO_BUF);
 	xfs_trans_log_buf(tp, bp, ioffset,
 				  ioffset + sizeof(struct xfs_dinode) - 1);
@@ -1632,6 +1639,13 @@ write:
 	/* Write out the inode. */
 	trace_xrep_dinode_fixed(sc, dip);
 	xfs_dinode_calc_crc(mp, dip);
+
+	/*
+	 * We don't mark the buffer with xfs_trans_inode_buf() as that would
+	 * cause recovery to only replay unlinked list pointers. However, we
+	 * still need to set the buffer type for recovery to correctly classify
+	 * it as an inode buffer.
+	 */
 	xfs_trans_buf_set_type(sc->tp, bp, XFS_BLFT_DINO_BUF);
 	xfs_trans_log_buf(sc->tp, bp, ri->imap.im_boffset,
 			ri->imap.im_boffset + mp->m_sb.sb_inodesize - 1);

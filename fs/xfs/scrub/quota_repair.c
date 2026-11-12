@@ -408,6 +408,13 @@ xrep_quota_block(
 		buftype = XFS_BLFT_PDQUOT_BUF;
 		break;
 	}
+
+	/*
+	 * We don't mark the buffer with xfs_trans_dquot_buf() as that would
+	 * cause recovery to skip replaying it when quotas are not in use.
+	 * However, we still need to set the buffer type for recovery to
+	 * correctly classify it as a dquot buffer.
+	 */
 	xfs_trans_buf_set_type(sc->tp, bp, buftype);
 	xfs_trans_log_buf(sc->tp, bp, 0, BBTOB(bp->b_length) - 1);
 	return xrep_roll_trans(sc);
