@@ -123,13 +123,13 @@ xfs_btree_check_agblock_siblings(
 
 static xfs_failaddr_t
 __xfs_btree_check_lblock_hdr(
-	struct xfs_btree_cur	*cur,
+	struct xfs_mount	*mp,
+	uint32_t		magic,
+	unsigned int		maxrecs,
 	struct xfs_btree_block	*block,
 	int			level,
 	struct xfs_buf		*bp)
 {
-	struct xfs_mount	*mp = cur->bc_mp;
-
 	if (xfs_has_crc(mp)) {
 		if (!uuid_equal(&block->bb_u.l.bb_uuid, &mp->m_sb.sb_meta_uuid))
 			return __this_address;
@@ -140,12 +140,11 @@ __xfs_btree_check_lblock_hdr(
 			return __this_address;
 	}
 
-	if (be32_to_cpu(block->bb_magic) != xfs_btree_magic(mp, cur->bc_ops))
+	if (be32_to_cpu(block->bb_magic) != magic)
 		return __this_address;
 	if (be16_to_cpu(block->bb_level) != level)
 		return __this_address;
-	if (be16_to_cpu(block->bb_numrecs) >
-	    cur->bc_ops->get_maxrecs(cur, level))
+	if (be16_to_cpu(block->bb_numrecs) > maxrecs)
 		return __this_address;
 
 	return NULL;
@@ -157,16 +156,17 @@ __xfs_btree_check_lblock_hdr(
  */
 static xfs_failaddr_t
 __xfs_btree_check_fsblock(
-	struct xfs_btree_cur	*cur,
+	struct xfs_mount	*mp,
+	uint32_t		magic,
+	unsigned int		maxrecs,
 	struct xfs_btree_block	*block,
 	int			level,
 	struct xfs_buf		*bp)
 {
-	struct xfs_mount	*mp = cur->bc_mp;
 	xfs_failaddr_t		fa;
 	xfs_fsblock_t		fsb;
 
-	fa = __xfs_btree_check_lblock_hdr(cur, block, level, bp);
+	fa = __xfs_btree_check_lblock_hdr(mp, magic, maxrecs, block, level, bp);
 	if (fa)
 		return fa;
 
@@ -192,6 +192,29 @@ __xfs_btree_check_fsblock(
 }
 
 /*
+ * Check the header of a long format btree root that sits in an inode fork,
+ * without needing a btree cursor. The block is a root, so it has no siblings.
+ * The caller supplies the block magic, the maximum records for the block, and
+ * the valid level range for the btree.
+ */
+xfs_failaddr_t
+xfs_btree_check_fsblock_root_hdr(
+	struct xfs_mount	*mp,
+	uint32_t		magic,
+	unsigned int		maxrecs,
+	struct xfs_btree_block	*block,
+	unsigned int		minlevel,
+	unsigned int		maxlevel)
+{
+	unsigned int		level = be16_to_cpu(block->bb_level);
+
+	if (level < minlevel || level > maxlevel)
+		return __this_address;
+
+	return __xfs_btree_check_fsblock(mp, magic, maxrecs, block, level, NULL);
+}
+
+/*
  * Check an in-memory btree block header.  Return the address of the failing
  * check, or NULL if everything is ok.
  */
@@ -202,11 +225,13 @@ __xfs_btree_check_memblock(
 	int			level,
 	struct xfs_buf		*bp)
 {
+	struct xfs_mount	*mp = cur->bc_mp;
 	struct xfs_buftarg	*btp = cur->bc_mem.xfbtree->target;
 	xfs_failaddr_t		fa;
 	xfbno_t			bno;
 
-	fa = __xfs_btree_check_lblock_hdr(cur, block, level, bp);
+	fa = __xfs_btree_check_lblock_hdr(mp, xfs_btree_magic(mp, cur->bc_ops),
+			cur->bc_ops->get_maxrecs(cur, level), block, level, bp);
 	if (fa)
 		return fa;
 
@@ -277,7 +302,10 @@ __xfs_btree_check_block(
 	case XFS_BTREE_TYPE_AG:
 		return __xfs_btree_check_agblock(cur, block, level, bp);
 	case XFS_BTREE_TYPE_INODE:
-		return __xfs_btree_check_fsblock(cur, block, level, bp);
+		return __xfs_btree_check_fsblock(cur->bc_mp,
+				xfs_btree_magic(cur->bc_mp, cur->bc_ops),
+				cur->bc_ops->get_maxrecs(cur, level),
+				block, level, bp);
 	default:
 		ASSERT(0);
 		return __this_address;
