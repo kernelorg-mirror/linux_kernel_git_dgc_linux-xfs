@@ -882,6 +882,56 @@ xfs_mount_reinit_fs_geometry(
 }
 
 /*
+ * Apply the updates this mount makes to the in-core superblock. These are
+ * written back later in the mount, so they must be applied after any re-read of
+ * the superblock following log recovery.
+ */
+static int
+xfs_mount_apply_sb_updates(
+	struct xfs_mount	*mp)
+{
+	struct xfs_sb		*sbp = &mp->m_sb;
+
+	/*
+	 * Check for a mismatched features2 values.  Older kernels read & wrote
+	 * into the wrong sb offset for sb_features2 on some platforms due to
+	 * xfs_sb_t not being 64bit size aligned when sb_features2 was added,
+	 * which made older superblock reading/writing routines swap it as a
+	 * 64-bit value.
+	 *
+	 * For backwards compatibility, we make both slots equal.
+	 *
+	 * If we detect a mismatched field, we OR the set bits into the existing
+	 * features2 field in case it has already been modified; we don't want
+	 * to lose any features.  We then update the bad location with the ORed
+	 * value so that older kernels will see any features2 flags. The
+	 * superblock writeback code ensures the new sb_features2 is copied to
+	 * sb_bad_features2 before it is logged or written to disk.
+	 */
+	if (xfs_sb_has_mismatched_features2(sbp)) {
+		xfs_warn(mp, "correcting sb_features alignment problem");
+		sbp->sb_features2 |= sbp->sb_bad_features2;
+		mp->m_update_sb = true;
+	}
+
+	/* always use v2 inodes by default now */
+	if (!(sbp->sb_versionnum & XFS_SB_VERSION_NLINKBIT)) {
+		sbp->sb_versionnum |= XFS_SB_VERSION_NLINKBIT;
+		mp->m_features |= XFS_FEAT_NLINK;
+		mp->m_update_sb = true;
+	}
+
+	/*
+	 * Check if sb_agblocks is aligned at stripe boundary.  If sb_agblocks
+	 * is NOT aligned turn off m_dalign since allocator alignment is within
+	 * an ag, therefore ag has to be aligned at stripe boundary.  Note that
+	 * we must compute the free space and rmap btree geometry before doing
+	 * this.
+	 */
+	return xfs_update_alignment(mp);
+}
+
+/*
  * This function does the following on an initial mount of a file system:
  *	- reads the superblock from disk and init the mount struct
  *	- if we're a 32-bit kernel, do a size check on the superblock
@@ -906,36 +956,6 @@ xfs_mountfs(
 	xfs_sb_mount_common(mp, sbp);
 
 	/*
-	 * Check for a mismatched features2 values.  Older kernels read & wrote
-	 * into the wrong sb offset for sb_features2 on some platforms due to
-	 * xfs_sb_t not being 64bit size aligned when sb_features2 was added,
-	 * which made older superblock reading/writing routines swap it as a
-	 * 64-bit value.
-	 *
-	 * For backwards compatibility, we make both slots equal.
-	 *
-	 * If we detect a mismatched field, we OR the set bits into the existing
-	 * features2 field in case it has already been modified; we don't want
-	 * to lose any features.  We then update the bad location with the ORed
-	 * value so that older kernels will see any features2 flags. The
-	 * superblock writeback code ensures the new sb_features2 is copied to
-	 * sb_bad_features2 before it is logged or written to disk.
-	 */
-	if (xfs_sb_has_mismatched_features2(sbp)) {
-		xfs_warn(mp, "correcting sb_features alignment problem");
-		sbp->sb_features2 |= sbp->sb_bad_features2;
-		mp->m_update_sb = true;
-	}
-
-
-	/* always use v2 inodes by default now */
-	if (!(mp->m_sb.sb_versionnum & XFS_SB_VERSION_NLINKBIT)) {
-		mp->m_sb.sb_versionnum |= XFS_SB_VERSION_NLINKBIT;
-		mp->m_features |= XFS_FEAT_NLINK;
-		mp->m_update_sb = true;
-	}
-
-	/*
 	 * If we were given new sunit/swidth options, do some basic validation
 	 * checks and convert the incore dalign and swidth values to the
 	 * same units (FSB) that everything else uses.  This /must/ happen
@@ -956,17 +976,6 @@ xfs_mountfs(
 
 	xfs_agbtree_compute_maxlevels(mp);
 	xfs_rtbtree_compute_maxlevels(mp);
-
-	/*
-	 * Check if sb_agblocks is aligned at stripe boundary.  If sb_agblocks
-	 * is NOT aligned turn off m_dalign since allocator alignment is within
-	 * an ag, therefore ag has to be aligned at stripe boundary.  Note that
-	 * we must compute the free space and rmap btree geometry before doing
-	 * this.
-	 */
-	error = xfs_update_alignment(mp);
-	if (error)
-		goto out;
 
 	/* enable fail_at_unmount as default */
 	mp->m_fail_unmount = true;
@@ -1105,6 +1114,10 @@ xfs_mountfs(
 		if (error)
 			goto out_free_metadir;
 	}
+
+	error = xfs_mount_apply_sb_updates(mp);
+	if (error)
+		goto out_free_metadir;
 
 	/*
 	 * If we're resuming quota status and recovered the log, re-sample the
