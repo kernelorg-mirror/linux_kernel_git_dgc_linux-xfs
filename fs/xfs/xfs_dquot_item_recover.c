@@ -208,8 +208,46 @@ xlog_recover_quotaoff_commit_pass1(
 	return 0;
 }
 
+/*
+ * Quota off items were last logged by v5.14 kernels. The format structure was
+ * written at the start of the region, but the region was sized as the in-core
+ * struct xfs_qoff_logitem. The region is therefore 160 bytes on 64 bit platforms
+ * and 88 bytes on 32 bit platforms. Only the format structure was ever written.
+ * The rest of the region is stale memory, so it cannot be checked.
+ */
+#define XFS_QOFF_LOG_REGION_SIZE_64	160
+#define XFS_QOFF_LOG_REGION_SIZE_32	88
+
+static int
+xlog_recover_quotaoff_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	struct xfs_qoff_logformat	*qoff_f = item->ri_buf[region_index].iov_base;
+	size_t				len = item->ri_buf[region_index].iov_len;
+
+	if (len != XFS_QOFF_LOG_REGION_SIZE_64 &&
+	    len != XFS_QOFF_LOG_REGION_SIZE_32) {
+		xfs_warn(log->l_mp, "QOFF: bad item region length %zu recovered.",
+				len);
+		return -EFSCORRUPTED;
+	}
+
+	/* Quota off was only logged when it turned off quota accounting. */
+	if (!qoff_f->qf_flags || (qoff_f->qf_flags & ~XFS_ALL_QUOTA_ACCT)) {
+		xfs_warn(log->l_mp, "QOFF: bad flags 0x%x recovered.",
+				qoff_f->qf_flags);
+		return -EFSCORRUPTED;
+	}
+	return 0;
+}
+
 const struct xlog_recover_item_ops xlog_quotaoff_item_ops = {
 	.item_type		= XFS_LI_QUOTAOFF,
+	.min_hdr_len		= sizeof(struct xfs_qoff_logformat),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_quotaoff_validate_region,
 	.commit_pass1		= xlog_recover_quotaoff_commit_pass1,
 	/* nothing to commit in pass2 */
 };
