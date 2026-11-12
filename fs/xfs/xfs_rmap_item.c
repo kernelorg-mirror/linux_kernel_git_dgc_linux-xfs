@@ -578,23 +578,10 @@ xfs_rmap_recover_work(
 	int				i;
 	int				error = 0;
 
-	/*
-	 * First check the validity of the extents described by the
-	 * RUI.  If any are bad, then assume that all are bad and
-	 * just toss the RUI.
-	 */
-	for (i = 0; i < ruip->rui_format.rui_nextents; i++) {
-		if (!xfs_rui_validate_map(mp, isrt,
-					&ruip->rui_format.rui_extents[i])) {
-			XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-					&ruip->rui_format,
-					sizeof(ruip->rui_format));
-			return -EFSCORRUPTED;
-		}
-
+	/* The extents were validated when the rui was recovered. */
+	for (i = 0; i < ruip->rui_format.rui_nextents; i++)
 		xfs_rui_recover_work(mp, dfp, isrt,
 				&ruip->rui_format.rui_extents[i]);
-	}
 
 	resv = xlog_recover_resv(&M_RES(mp)->tr_itruncate);
 	if (isrt)
@@ -746,22 +733,8 @@ xlog_recover_rui_commit_pass2(
 	struct xfs_mount		*mp = log->l_mp;
 	struct xfs_rui_log_item		*ruip;
 	struct xfs_rui_log_format	*rui_formatp;
-	size_t				len;
 
 	rui_formatp = item->ri_buf[0].iov_base;
-
-	if (item->ri_buf[0].iov_len < xfs_rui_log_format_sizeof(0)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
-
-	len = xfs_rui_log_format_sizeof(rui_formatp->rui_nextents);
-	if (item->ri_buf[0].iov_len != len) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
 
 	ruip = xfs_rui_init(mp, ITEM_TYPE(item), rui_formatp->rui_nextents);
 	xfs_rui_copy_format(&ruip->rui_format, rui_formatp);
@@ -772,8 +745,80 @@ xlog_recover_rui_commit_pass2(
 	return 0;
 }
 
+/*
+ * The rui is a single region whose length must match its extent count. The
+ * rmap map extent has fixed width fields, so there is a single on-disk format.
+ * This is shared by the data and realtime rui items, which have identical
+ * formats.
+ */
+static int
+xlog_recover_rui_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	struct xfs_rui_log_format	*rui_formatp =
+		item->ri_buf[region_index].iov_base;
+	size_t				len = item->ri_buf[region_index].iov_len;
+	uint32_t			nextents;
+
+	if (len < xfs_rui_log_format_sizeof(0)) {
+		xfs_warn(log->l_mp, "RUI: bad item region length %zu recovered.",
+				len);
+		return -EFSCORRUPTED;
+	}
+
+	/*
+	 * Bound the extent count before the exact size check below so a corrupt
+	 * count cannot overflow the size calculation. This limit is a fuzzy
+	 * upper bound to prevent overflow; the size check that follows enforces
+	 * the precise length.
+	 */
+	nextents = rui_formatp->rui_nextents;
+	if (nextents == 0 ||
+	    nextents > XLOG_MAX_REGION_SIZE / sizeof(struct xfs_map_extent)) {
+		xfs_warn(log->l_mp, "RUI: bad extent count %u recovered.",
+				nextents);
+		return -EFSCORRUPTED;
+	}
+
+	if (len != xfs_rui_log_format_sizeof(nextents)) {
+		xfs_warn(log->l_mp,
+			"RUI: item region length %zu does not match %u extents recovered.",
+			len, nextents);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
+/* Validate the rmap update extents in the rui. */
+static int
+xlog_recover_rui_validate_item(
+	struct xlog			*log,
+	struct xlog_recover_item	*item)
+{
+	struct xfs_rui_log_format	*rui_formatp = item->ri_buf[0].iov_base;
+	bool				isrt = ITEM_TYPE(item) == XFS_LI_RUI_RT;
+	uint32_t			i;
+
+	for (i = 0; i < rui_formatp->rui_nextents; i++) {
+		if (!xfs_rui_validate_map(log->l_mp, isrt,
+					&rui_formatp->rui_extents[i])) {
+			xfs_warn(log->l_mp, "RUI: bad extent %u recovered.", i);
+			return -EFSCORRUPTED;
+		}
+	}
+
+	return 0;
+}
+
 const struct xlog_recover_item_ops xlog_rui_item_ops = {
 	.item_type		= XFS_LI_RUI,
+	.min_hdr_len		= sizeof(struct xfs_rui_log_format),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_rui_validate_region,
+	.validate_item		= xlog_recover_rui_validate_item,
 	.commit_pass2		= xlog_recover_rui_commit_pass2,
 };
 
@@ -788,22 +833,8 @@ xlog_recover_rtrui_commit_pass2(
 	struct xfs_mount		*mp = log->l_mp;
 	struct xfs_rui_log_item		*ruip;
 	struct xfs_rui_log_format	*rui_formatp;
-	size_t				len;
 
 	rui_formatp = item->ri_buf[0].iov_base;
-
-	if (item->ri_buf[0].iov_len < xfs_rui_log_format_sizeof(0)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
-
-	len = xfs_rui_log_format_sizeof(rui_formatp->rui_nextents);
-	if (item->ri_buf[0].iov_len != len) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
-		return -EFSCORRUPTED;
-	}
 
 	ruip = xfs_rui_init(mp, ITEM_TYPE(item), rui_formatp->rui_nextents);
 	xfs_rui_copy_format(&ruip->rui_format, rui_formatp);
@@ -829,6 +860,10 @@ xlog_recover_rtrui_commit_pass2(
 
 const struct xlog_recover_item_ops xlog_rtrui_item_ops = {
 	.item_type		= XFS_LI_RUI_RT,
+	.min_hdr_len		= sizeof(struct xfs_rui_log_format),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_rui_validate_region,
+	.validate_item		= xlog_recover_rui_validate_item,
 	.commit_pass2		= xlog_recover_rtrui_commit_pass2,
 };
 
