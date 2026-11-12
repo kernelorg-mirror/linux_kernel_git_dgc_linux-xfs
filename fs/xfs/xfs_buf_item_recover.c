@@ -27,6 +27,8 @@
 #include "xfs_sb.h"
 #include "xfs_rtgroup.h"
 #include "xfs_rtbitmap.h"
+#include "xfs_rtrmap_btree.h"
+#include "xfs_rtrefcount_btree.h"
 
 /*
  * This is the number of entries in the l_buf_cancel_table used during
@@ -741,6 +743,7 @@ xlog_recover_do_primary_sb_buffer(
 	struct xfs_dsb			*dsb = bp->b_addr;
 	xfs_agnumber_t			orig_agcount = mp->m_sb.sb_agcount;
 	xfs_rgnumber_t			orig_rgcount = mp->m_sb.sb_rgcount;
+	xfs_rfsblock_t			orig_rblocks = mp->m_sb.sb_rblocks;
 	int				error;
 
 	error = xlog_recover_do_reg_buffer(mp, item, bp, buf_f, current_lsn);
@@ -753,9 +756,34 @@ xlog_recover_do_primary_sb_buffer(
 	}
 
 	/*
+	 * Growfs can add the first realtime volume to a filesystem that was
+	 * mounted with a realtime device but had no realtime section. Without
+	 * a realtime device the new realtime volume cannot be recovered.
+	 *
+	 * Check this before the in-core superblock is updated. A failed mount
+	 * frees the rtgroups counted by the in-core superblock, and the new
+	 * rtgroups have not been created yet.
+	 */
+	if (orig_rblocks == 0 && be64_to_cpu(dsb->sb_rblocks) > 0 &&
+	    !XFS_IS_REALTIME_MOUNT(mp)) {
+		xfs_warn(mp,
+	"Recovered a realtime volume, use rtdev=device option");
+		return -ENODEV;
+	}
+
+	/*
 	 * Update the in-core super block from the freshly recovered on-disk one.
 	 */
 	xfs_sb_from_disk(&mp->m_sb, dsb);
+
+	/*
+	 * Growfs can change the realtime extent size when it adds the first
+	 * realtime volume, and adding it sets the realtime feature. Update the
+	 * realtime geometry and the mount features before the rtgroups are
+	 * set up, as both are used to calculate the rtgroup geometry.
+	 */
+	xfs_sb_mount_rextsize(mp, &mp->m_sb);
+	mp->m_features |= xfs_sb_version_to_features(&mp->m_sb);
 
 	/*
 	 * Grow can change the device size.  Mirror that into the buftarg.
@@ -816,6 +844,16 @@ xlog_recover_do_primary_sb_buffer(
 		xfs_warn(mp, "Failed recovery rtgroup init: %d", error);
 		return error;
 	}
+
+	/*
+	 * The realtime btree geometry depends on the realtime volume and the
+	 * data device size, both of which growfs can change. Later recovery
+	 * verifies realtime btree blocks against that geometry, so recompute
+	 * the realtime btree maximum heights now.
+	 */
+	xfs_rtrmapbt_compute_maxlevels(mp);
+	xfs_rtrefcountbt_compute_maxlevels(mp);
+	xfs_rtbtree_compute_maxlevels(mp);
 	return 0;
 }
 
