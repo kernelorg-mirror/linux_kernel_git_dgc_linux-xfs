@@ -1167,14 +1167,35 @@ xlog_recover_attrd_commit_pass2(
 	struct xfs_attrd_log_format	*attrd_formatp;
 
 	attrd_formatp = item->ri_buf[0].iov_base;
-	if (item->ri_buf[0].iov_len != sizeof(struct xfs_attrd_log_format)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, log->l_mp,
-				item->ri_buf[0].iov_base, item->ri_buf[0].iov_len);
+	xlog_recover_release_intent(log, XFS_LI_ATTRI,
+				    attrd_formatp->alfd_alf_id);
+	return 0;
+}
+
+/* The attrd is a single fixed size region. */
+static int
+xlog_recover_attrd_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	struct xfs_attrd_log_format	*attrd_formatp =
+		item->ri_buf[region_index].iov_base;
+
+	if (item->ri_buf[region_index].iov_len !=
+			sizeof(struct xfs_attrd_log_format)) {
+		xfs_warn(log->l_mp, "ATTRD: bad item region length %zu recovered.",
+				item->ri_buf[region_index].iov_len);
 		return -EFSCORRUPTED;
 	}
 
-	xlog_recover_release_intent(log, XFS_LI_ATTRI,
-				    attrd_formatp->alfd_alf_id);
+	/* The padding is always written as zero. */
+	if (attrd_formatp->__pad != 0) {
+		xfs_warn(log->l_mp, "ATTRD: bad padding 0x%x recovered.",
+				attrd_formatp->__pad);
+		return -EFSCORRUPTED;
+	}
+
 	return 0;
 }
 
@@ -1203,5 +1224,8 @@ static const struct xfs_item_ops xfs_attrd_item_ops = {
 
 const struct xlog_recover_item_ops xlog_attrd_item_ops = {
 	.item_type	= XFS_LI_ATTRD,
+	.min_hdr_len	= sizeof(struct xfs_attrd_log_format),
+	.validate_nregions = xlog_recover_single_region,
+	.validate_region = xlog_recover_attrd_validate_region,
 	.commit_pass2	= xlog_recover_attrd_commit_pass2,
 };
