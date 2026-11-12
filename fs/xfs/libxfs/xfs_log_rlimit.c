@@ -249,3 +249,48 @@ xfs_log_calc_minimum_size(
 
 	return XFS_BB_TO_FSB(mp, min_logblks);
 }
+
+/*
+ * Calculate the largest transaction reservation, in bytes, that fits in the
+ * current log. The reservation is a unit reservation from
+ * xfs_log_calc_unit_res() multiplied by the log count, as in
+ * xfs_log_calc_minimum_size().
+ *
+ * This is the inverse of xfs_log_calc_minimum_size(): a reservation fits in the
+ * log if, and only if, it is no larger than the value returned here. The two
+ * functions must be kept in step.
+ *
+ * xfs_log_calc_minimum_size() temporarily changes mount state to calculate the
+ * reservations, so it can only be used at mkfs and mount time. This function
+ * only reads the superblock log geometry, so it is safe to use on a live
+ * filesystem.
+ */
+int
+xfs_log_calc_max_res(
+	struct xfs_mount	*mp)
+{
+	int			logbbs;
+	int			lsunit = 0;
+
+	/* The superblock verifier limits the log to XFS_MAX_LOG_BYTES. */
+	logbbs = (int)XFS_FSB_TO_BB(mp, mp->m_sb.sb_logblocks);
+	logbbs /= XFS_MIN_LOG_FACTOR;
+
+	if (xfs_has_logv2(mp) && mp->m_sb.sb_logsunit > 1)
+		lsunit = BTOBB(mp->m_sb.sb_logsunit);
+
+	if (lsunit) {
+		logbbs -= 2 * lsunit;
+		if (logbbs > 0)
+			logbbs = rounddown(logbbs, lsunit);
+	} else {
+		logbbs -= 2 * BBSIZE;
+	}
+
+	/* Mount has already checked that the log fits its reservations. */
+	ASSERT(logbbs > 0);
+	if (logbbs <= 0)
+		return 0;
+	ASSERT(logbbs < BTOBB(XFS_MAX_LOG_BYTES) / 2);
+	return BBTOB(logbbs);
+}

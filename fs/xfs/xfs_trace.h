@@ -264,6 +264,40 @@ TRACE_EVENT(xfs_calc_max_atomic_write_log_geometry,
 		  __entry->logres)
 );
 
+TRACE_EVENT(xfs_calc_atomic_write_reservation,
+	TP_PROTO(struct xfs_mount *mp, unsigned int per_intent,
+		 unsigned int step_size, unsigned int blockcount,
+		 unsigned int logres, uint64_t need_res, int max_res),
+	TP_ARGS(mp, per_intent, step_size, blockcount, logres, need_res,
+		max_res),
+	TP_STRUCT__entry(
+		__field(dev_t, dev)
+		__field(unsigned int, per_intent)
+		__field(unsigned int, step_size)
+		__field(unsigned int, blockcount)
+		__field(unsigned int, logres)
+		__field(uint64_t, need_res)
+		__field(int, max_res)
+	),
+	TP_fast_assign(
+		__entry->dev = mp->m_super->s_dev;
+		__entry->per_intent = per_intent;
+		__entry->step_size = step_size;
+		__entry->blockcount = blockcount;
+		__entry->logres = logres;
+		__entry->need_res = need_res;
+		__entry->max_res = max_res;
+	),
+	TP_printk("dev %d:%d per_intent %u step_size %u blockcount %u logres %u need_res %llu max_res %d",
+		  MAJOR(__entry->dev), MINOR(__entry->dev),
+		  __entry->per_intent,
+		  __entry->step_size,
+		  __entry->blockcount,
+		  __entry->logres,
+		  __entry->need_res,
+		  __entry->max_res)
+);
+
 TRACE_EVENT(xlog_intent_recovery_failed,
 	TP_PROTO(struct xfs_mount *mp, const struct xfs_defer_op_type *ops,
 		 int error),

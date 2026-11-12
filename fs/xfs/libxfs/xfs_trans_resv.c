@@ -1521,6 +1521,10 @@ xfs_calc_max_atomic_write_fsblocks(
  * Compute the log blocks and transaction reservation needed to complete an
  * atomic write of a given number of blocks.  Worst case, each block requires
  * separate handling.  A return value of 0 means something went wrong.
+ *
+ * This is for mkfs to size the log. It temporarily modifies the mount's
+ * transaction reservations and btree geometry, so it must not be used on a
+ * live filesystem.
  */
 xfs_extlen_t
 xfs_calc_atomic_write_log_geometry(
@@ -1559,29 +1563,56 @@ xfs_calc_atomic_write_log_geometry(
 /*
  * Compute the transaction reservation needed to complete an out of place
  * atomic write of a given number of blocks.
+ *
+ * This is called at mount and remount time, so it must not modify any mount
+ * state other than the atomic ioend reservation. The new reservation is
+ * checked against the largest reservation the current log can hold, and the
+ * atomic ioend reservation is only updated once it is known to fit.
  */
 int
 xfs_calc_atomic_write_reservation(
 	struct xfs_mount	*mp,
 	xfs_extlen_t		blockcount)
 {
-	unsigned int		new_logres;
-	xfs_extlen_t		min_logblocks;
+	struct xfs_trans_resv	*resp = M_RES(mp);
+	struct xfs_trans_res	tres;
+	unsigned int		per_intent, step_size;
+	unsigned int		logres;
+	uint64_t		need_res = 0;
+	int			max_res;
 
 	/*
 	 * If the caller doesn't ask for a specific atomic write size, then
 	 * use the defaults.
 	 */
 	if (blockcount == 0) {
-		xfs_calc_default_atomic_ioend_reservation(M_RES(mp));
+		xfs_calc_default_atomic_ioend_reservation(resp);
 		return 0;
 	}
 
-	min_logblocks = xfs_calc_atomic_write_log_geometry(mp, blockcount,
-			&new_logres);
-	if (!min_logblocks || min_logblocks > mp->m_sb.sb_logblocks)
+	per_intent = xfs_calc_atomic_write_ioend_geometry(mp, &step_size);
+
+	/* Check for overflows */
+	if (check_mul_overflow(blockcount, per_intent, &logres) ||
+	    check_add_overflow(logres, step_size, &logres) ||
+	    logres > INT_MAX)
 		return -EINVAL;
 
-	M_RES(mp)->tr_atomic_ioend.tr_logres = new_logres;
+	/* The atomic ioend reservation is based on the default. */
+	tres = resp->tr_itruncate;
+	tres.tr_logres = logres;
+
+	need_res = xfs_log_calc_unit_res(mp, tres.tr_logres);
+	if (tres.tr_logcount > 1)
+		need_res *= tres.tr_logcount;
+	max_res = xfs_log_calc_max_res(mp);
+
+	trace_xfs_calc_atomic_write_reservation(mp, per_intent, step_size,
+			blockcount, logres, need_res, max_res);
+
+	if (need_res > max_res)
+		return -EINVAL;
+
+	resp->tr_atomic_ioend = tres;
 	return 0;
 }
