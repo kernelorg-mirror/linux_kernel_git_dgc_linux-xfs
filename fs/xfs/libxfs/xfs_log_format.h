@@ -38,6 +38,14 @@ typedef uint32_t xlog_tid_t;
 
 #define XLOG_HEADER_SIZE	512
 
+/*
+ * The largest object that is logged in a single region: a whole buffer in a
+ * buffer log item, or a remote attribute value. This bounds the size of any
+ * single log region both when writing the log and when reassembling regions
+ * during recovery.
+ */
+#define XLOG_MAX_REGION_SIZE	max(XFS_MAX_BLOCKSIZE, XFS_XATTR_SIZE_MAX)
+
 /* Minimum number of transactions that must fit in the log (defined by mkfs) */
 #define XFS_MIN_LOG_FACTOR	3
 
