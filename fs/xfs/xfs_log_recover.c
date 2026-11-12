@@ -2400,6 +2400,18 @@ xlog_recover_add_to_cont_trans(
 	char			*ptr, *old_ptr;
 	int			old_len;
 
+	/*
+	 * A continuation must append to a region under assembly. The only valid
+	 * way to reach here without one is a region opened by a zero length op
+	 * header, which the dispatch in xlog_recovery_process_trans() routes to
+	 * xlog_recover_add_to_trans() instead. So no current item here means the
+	 * log is corrupt.
+	 */
+	if (!item) {
+		xfs_warn(log->l_mp, "%s: continuation with no item", __func__);
+		return -EFSCORRUPTED;
+	}
+
 	old_ptr = item->ri_buf[item->ri_cnt-1].iov_base;
 	old_len = item->ri_buf[item->ri_cnt-1].iov_len;
 
@@ -2445,8 +2457,28 @@ xlog_recover_add_to_trans(
 	char			*ptr;
 	int			error;
 
-	if (!len)
+	/*
+	 * Only the transaction header at the start of a checkpoint can be
+	 * opened by a zero length fragment, with its data following in the
+	 * continuation. A zero length fragment anywhere else, or one that
+	 * completes a region, is corrupt.
+	 *
+	 * There is nothing to decode yet, so leave a sentinel in r_cur_item so
+	 * that xlog_recover_process_trans() will call here again with the
+	 * continuation that carries the data we need to initialise the
+	 * recovery item.
+	 */
+	if (!len) {
+		if (region_complete || trans->r_cur_item ||
+		    trans->r_theader.th_magic == XFS_TRANS_HEADER_MAGIC) {
+			xfs_warn(log->l_mp,
+				"%s: zero length region in transaction 0x%x",
+				__func__, trans->r_log_tid);
+			return -EFSCORRUPTED;
+		}
+		trans->r_cur_item = XLOG_RECOVER_CONT_ITEM;
 		return 0;
+	}
 
 	ptr = xlog_kvmalloc(len);
 	memcpy(ptr, dp, len);
@@ -2461,7 +2493,7 @@ xlog_recover_add_to_trans(
 	 * fragment here.
 	 */
 	item = trans->r_cur_item;
-	if (!item) {
+	if (!item || item == XLOG_RECOVER_CONT_ITEM) {
 		struct xfs_inode_log_format *in_f = /* any will do */
 			(struct xfs_inode_log_format *)ptr;
 
@@ -2517,9 +2549,10 @@ xlog_recover_free_trans(
 
 	/*
 	 * An item still being rebuilt has not been added to the item queue yet,
-	 * so free it separately.
+	 * so free it separately. The sentinel is not a real item and has nothing
+	 * to free.
 	 */
-	if (trans->r_cur_item)
+	if (trans->r_cur_item && trans->r_cur_item != XLOG_RECOVER_CONT_ITEM)
 		xlog_recover_free_item(trans->r_cur_item);
 
 	/* Free the transaction recover structure */
@@ -2564,14 +2597,24 @@ xlog_recovery_process_trans(
 	 */
 	switch (flags) {
 	/* expected flag values */
+	case XLOG_WAS_CONT_TRANS:
+		/*
+		 * A continuation appends to the region under assembly, unless
+		 * the region was opened by a zero length op header. In that case
+		 * r_cur_item holds the sentinel and this continuation carries
+		 * the first data of the region, so fall through and decode it as
+		 * the first region of a new item.
+		 */
+		if (trans->r_cur_item != XLOG_RECOVER_CONT_ITEM) {
+			error = xlog_recover_add_to_cont_trans(log, trans, dp,
+							len, region_complete);
+			break;
+		}
+		fallthrough;
 	case 0:
 	case XLOG_CONTINUE_TRANS:
 		error = xlog_recover_add_to_trans(log, trans, dp, len,
 						  region_complete);
-		break;
-	case XLOG_WAS_CONT_TRANS:
-		error = xlog_recover_add_to_cont_trans(log, trans, dp, len,
-						       region_complete);
 		break;
 	case XLOG_COMMIT_TRANS:
 		/*
