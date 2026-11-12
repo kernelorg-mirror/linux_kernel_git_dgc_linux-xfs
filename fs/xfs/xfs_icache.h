@@ -41,6 +41,8 @@ struct xfs_icwalk {
 #define XFS_IGET_INCORE		(1U << 3)
 /* Return -EAGAIN immediately if the inode is unavailable. */
 #define XFS_IGET_NORETRY	(1U << 4)
+/* Map the inode by arithmetic only, never by an inode btree lookup. */
+#define XFS_IMAP_NO_LOOKUP	(1U << 5)
 
 int xfs_iget(struct xfs_mount *mp, struct xfs_trans *tp, xfs_ino_t ino,
 	     uint flags, uint lock_flags, xfs_inode_t **ipp);
