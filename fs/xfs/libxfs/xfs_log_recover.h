@@ -115,6 +115,7 @@ struct xlog_recover {
 	int			r_state;	/* not needed */
 	xfs_lsn_t		r_lsn;		/* xact lsn */
 	struct list_head	r_itemq;	/* q for items */
+	bool			r_hdr_decoded;	/* trans header fully decoded */
 };
 
 #define ITEM_TYPE(i)	(*(unsigned short *)(i)->ri_buf[0].iov_base)
