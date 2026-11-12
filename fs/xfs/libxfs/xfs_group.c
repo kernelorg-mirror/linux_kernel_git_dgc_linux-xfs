@@ -159,6 +159,15 @@ xfs_group_free(
 {
 	struct xfs_group	*xg = xa_erase(&mp->m_groups[type].xa, index);
 
+	/*
+	 * When shutdown failures occur concurrently with runtime geometry
+	 * changes, the instantiated groups might be out of sync with the
+	 * superblock group count. This can result in mount teardown iterating
+	 * group indexes that have not yet been instantiated.
+	 */
+	if (!xg)
+		return;
+
 	XFS_IS_CORRUPT(mp, atomic_read(&xg->xg_ref) != 0);
 
 	xfs_defer_drain_free(&xg->xg_intents_drain);
