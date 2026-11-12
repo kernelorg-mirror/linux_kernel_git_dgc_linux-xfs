@@ -1403,6 +1403,33 @@ xfs_trans_resv_calc(
 }
 
 /*
+ * Recompute the transaction reservations on a live filesystem after growfs
+ * has changed the geometry they depend on.
+ *
+ * The new reservations are calculated in a separate table and copied into
+ * place, so that transactions starting during the update never see partially
+ * calculated values.
+ *
+ * A configured atomic ioend reservation depends only on intent item sizes,
+ * AG btree heights, the bmap btree height and the filesystem features, none of
+ * which growfs changes. Keep it, rather than resetting it to the default.
+ *
+ * This is not serialised against a remount that changes max_atomic_write,
+ * which also updates the atomic ioend reservation.
+ */
+void
+xfs_trans_resv_recalc(
+	struct xfs_mount	*mp)
+{
+	struct xfs_trans_resv	resv = {};
+
+	xfs_trans_resv_calc(mp, &resv);
+	if (mp->m_awu_max_bytes)
+		resv.tr_atomic_ioend = M_RES(mp)->tr_atomic_ioend;
+	*M_RES(mp) = resv;
+}
+
+/*
  * Return the per-extent and fixed transaction reservation sizes needed to
  * complete an atomic write.
  */

@@ -223,10 +223,14 @@ xfs_growfs_data_private(
 		if (error == -ENOSPC)
 			error = 0;
 
-		/* Compute new maxlevels for rt btrees. */
+		/*
+		 * Compute new maxlevels for rt btrees, and the transaction
+		 * reservations that depend on them.
+		 */
 		xfs_rtrmapbt_compute_maxlevels(mp);
 		xfs_rtrefcountbt_compute_maxlevels(mp);
 		xfs_rtbtree_compute_maxlevels(mp);
+		xfs_trans_resv_recalc(mp);
 	}
 
 	return error;

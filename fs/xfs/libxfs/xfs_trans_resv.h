@@ -97,6 +97,7 @@ struct xfs_trans_resv {
 #define	XFS_WRITE_LOG_COUNT_REFLINK	8
 
 void xfs_trans_resv_calc(struct xfs_mount *mp, struct xfs_trans_resv *resp);
+void xfs_trans_resv_recalc(struct xfs_mount *mp);
 uint xfs_allocfree_block_count(struct xfs_mount *mp, uint num_ops);
 
 unsigned int xfs_calc_finish_bui_reservation(struct xfs_mount *mp,

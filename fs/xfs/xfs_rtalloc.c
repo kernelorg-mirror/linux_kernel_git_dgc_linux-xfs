@@ -928,12 +928,14 @@ xfs_growfs_rt_zoned(
 
 	/*
 	 * Ensure the mount RT feature flag is now set, and compute new
-	 * maxlevels for rt btrees.
+	 * maxlevels for rt btrees and the transaction reservations that depend
+	 * on them.
 	 */
 	mp->m_features |= XFS_FEAT_REALTIME;
 	xfs_rtrmapbt_compute_maxlevels(mp);
 	xfs_rtrefcountbt_compute_maxlevels(mp);
 	xfs_rtbtree_compute_maxlevels(mp);
+	xfs_trans_resv_recalc(mp);
 
 	/*
 	 * Finally add the newly added zone to the freelist and add the space
@@ -1055,11 +1057,6 @@ xfs_growfs_rt_bmblock(
 	mp->m_rsumblocks = nmp->m_rsumblocks;
 
 	/*
-	 * Recompute the growfsrt reservation from the new rsumsize.
-	 */
-	xfs_trans_resv_calc(mp, &mp->m_resv);
-
-	/*
 	 * Sync sb counters now to reflect the updated values. Lazy counters are
 	 * not always updated and in order to avoid inconsistencies between
 	 * frextents and rtextents, it is better to sync the counters.
@@ -1074,12 +1071,14 @@ xfs_growfs_rt_bmblock(
 
 	/*
 	 * Ensure the mount RT feature flag is now set, and compute new
-	 * maxlevels for rt btrees.
+	 * maxlevels for rt btrees and the transaction reservations that depend
+	 * on them.
 	 */
 	mp->m_features |= XFS_FEAT_REALTIME;
 	xfs_rtrmapbt_compute_maxlevels(mp);
 	xfs_rtrefcountbt_compute_maxlevels(mp);
 	xfs_rtbtree_compute_maxlevels(mp);
+	xfs_trans_resv_recalc(mp);
 
 	kfree(nmp);
 	return 0;
