@@ -559,17 +559,36 @@ xfs_iformat_rtrefcount(
 	numrecs = be16_to_cpu(dfp->bb_numrecs);
 	level = be16_to_cpu(dfp->bb_level);
 
-	if (level >= mp->m_rtrefc_maxlevels ||
-	    xfs_rtrefcount_droot_space_calc(level, numrecs) > dsize) {
-		xfs_inode_mark_sick(ip, XFS_SICK_INO_CORE);
-		return -EFSCORRUPTED;
+	if (level == 0) {
+		/*
+		 * rtrefcount inodes can be dynamically created by growfs,
+		 * resulting in a transient state on disk where they can have no
+		 * contents. Hence a rtrefcount inode with an empty level zero
+		 * root is a valid state. Until growfs adds the first realtime
+		 * volume there is nothing to count, so the root must be empty.
+		 */
+		if (mp->m_rtrefc_maxlevels == 0 && numrecs != 0)
+			goto out_corrupt;
+	} else if (level >= mp->m_rtrefc_maxlevels) {
+		/*
+		 * m_rtrefc_maxlevels includes the inode root level, so the
+		 * deepest valid root level is one less than that.
+		 */
+		goto out_corrupt;
 	}
+
+	if (xfs_rtrefcount_droot_space_calc(level, numrecs) > dsize)
+		goto out_corrupt;
 
 	broot = xfs_broot_alloc(xfs_ifork_ptr(ip, XFS_DATA_FORK),
 			xfs_rtrefcount_broot_space_calc(level, numrecs));
 	if (broot)
 		xfs_rtrefcountbt_from_disk(ip, dfp, dsize, broot);
 	return 0;
+
+out_corrupt:
+	xfs_inode_mark_sick(ip, XFS_SICK_INO_CORE);
+	return -EFSCORRUPTED;
 }
 
 /*

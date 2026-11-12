@@ -1002,8 +1002,13 @@ xrep_dinode_bad_rtrefcountbt_fork(
 	nrecs = be16_to_cpu(dfp->bb_numrecs);
 	level = be16_to_cpu(dfp->bb_level);
 
-	if (level > sc->mp->m_rtrefc_maxlevels)
+	/* Same root level rules as xfs_iformat_rtrefcount(). */
+	if (level == 0) {
+		if (sc->mp->m_rtrefc_maxlevels == 0 && nrecs != 0)
+			return true;
+	} else if (level >= sc->mp->m_rtrefc_maxlevels) {
 		return true;
+	}
 	if (xfs_rtrefcount_droot_space_calc(level, nrecs) > dfork_size)
 		return true;
 	if (level > 0 && nrecs == 0)
