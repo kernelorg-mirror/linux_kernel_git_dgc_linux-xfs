@@ -2097,15 +2097,19 @@ out:
 	return error;
 }
 
-STATIC void
+STATIC struct xlog_recover_item *
 xlog_recover_add_item(
-	struct list_head	*head)
+	struct xlog_recover	*trans)
 {
 	struct xlog_recover_item *item;
 
 	item = kzalloc_obj(struct xlog_recover_item, GFP_KERNEL | __GFP_NOFAIL);
 	INIT_LIST_HEAD(&item->ri_list);
-	list_add_tail(&item->ri_list, head);
+	list_add_tail(&item->ri_list, &trans->r_itemq);
+
+	/* this is now the item being rebuilt */
+	trans->r_cur_item = item;
+	return item;
 }
 
 /*
@@ -2166,7 +2170,7 @@ xlog_recover_init_new_trans(
 	 */
 	if (cont || len == sizeof(struct xfs_trans_header)) {
 		trans->r_hdr_decoded = true;
-		xlog_recover_add_item(&trans->r_itemq);
+		xlog_recover_add_item(trans);
 	}
 	return 0;
 }
@@ -2178,13 +2182,9 @@ xlog_recover_add_to_cont_trans(
 	char			*dp,
 	int			len)
 {
-	struct xlog_recover_item *item;
+	struct xlog_recover_item *item = trans->r_cur_item;
 	char			*ptr, *old_ptr;
 	int			old_len;
-
-	/* take the tail entry */
-	item = list_entry(trans->r_itemq.prev, struct xlog_recover_item,
-			  ri_list);
 
 	old_ptr = item->ri_buf[item->ri_cnt-1].iov_base;
 	old_len = item->ri_buf[item->ri_cnt-1].iov_len;
@@ -2230,15 +2230,12 @@ xlog_recover_add_to_trans(
 	memcpy(ptr, dp, len);
 	in_f = (struct xfs_inode_log_format *)ptr;
 
-	/* take the tail entry */
-	item = list_entry(trans->r_itemq.prev, struct xlog_recover_item,
-			  ri_list);
+	/* the item currently being rebuilt */
+	item = trans->r_cur_item;
 	if (item->ri_total != 0 &&
 	     item->ri_total == item->ri_cnt) {
-		/* tail item is in use, get a new one */
-		xlog_recover_add_item(&trans->r_itemq);
-		item = list_entry(trans->r_itemq.prev,
-					struct xlog_recover_item, ri_list);
+		/* current item is full, start a new one */
+		item = xlog_recover_add_item(trans);
 	}
 
 	if (item->ri_total == 0) {		/* first region to be added */
