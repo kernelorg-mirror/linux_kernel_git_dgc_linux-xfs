@@ -179,6 +179,38 @@ xfs_dquot_buf_verify_crc(
 	return true;
 }
 
+/*
+ * Verify every dquot in a full chunk of dquots. We don't know what the id of
+ * the first dquot is supposed to be, just that they should be increasing
+ * monotonically within the chunk. If the first id is corrupt, then it will fail
+ * on the second dquot in the chunk so corruptions could point to the wrong
+ * dquot in this case. On failure @dqb is updated to point at the failing dquot
+ * so the caller can report it.
+ */
+xfs_failaddr_t
+xfs_dquot_verify_chunk(
+	struct xfs_mount	*mp,
+	struct xfs_dqblk	**dqb,
+	unsigned int		ndquots)
+{
+	xfs_failaddr_t		fa;
+	xfs_dqid_t		id = 0;
+	unsigned int		i;
+
+	for (i = 0; i < ndquots; i++) {
+		if (i == 0)
+			id = be32_to_cpu((*dqb)[i].dd_diskdq.d_id);
+
+		fa = xfs_dqblk_verify(mp, &(*dqb)[i], id + i);
+		if (fa) {
+			*dqb = &(*dqb)[i];
+			return fa;
+		}
+	}
+
+	return NULL;
+}
+
 STATIC xfs_failaddr_t
 xfs_dquot_buf_verify(
 	struct xfs_mount	*mp,
@@ -187,9 +219,7 @@ xfs_dquot_buf_verify(
 {
 	struct xfs_dqblk	*dqb = bp->b_addr;
 	xfs_failaddr_t		fa;
-	xfs_dqid_t		id = 0;
 	int			ndquots;
-	int			i;
 
 	/*
 	 * if we are in log recovery, the quota subsystem has not been
@@ -201,32 +231,12 @@ xfs_dquot_buf_verify(
 	else
 		ndquots = xfs_calc_dquots_per_chunk(bp->b_length);
 
-	/*
-	 * On the first read of the buffer, verify that each dquot is valid.
-	 * We don't know what the id of the dquot is supposed to be, just that
-	 * they should be increasing monotonically within the buffer. If the
-	 * first id is corrupt, then it will fail on the second dquot in the
-	 * buffer so corruptions could point to the wrong dquot in this case.
-	 */
-	for (i = 0; i < ndquots; i++) {
-		struct xfs_disk_dquot	*ddq;
+	fa = xfs_dquot_verify_chunk(mp, &dqb, ndquots);
+	if (fa && !readahead)
+		xfs_buf_verifier_error(bp, -EFSCORRUPTED, __func__, dqb,
+				sizeof(struct xfs_dqblk), fa);
 
-		ddq = &dqb[i].dd_diskdq;
-
-		if (i == 0)
-			id = be32_to_cpu(ddq->d_id);
-
-		fa = xfs_dqblk_verify(mp, &dqb[i], id + i);
-		if (fa) {
-			if (!readahead)
-				xfs_buf_verifier_error(bp, -EFSCORRUPTED,
-					__func__, &dqb[i],
-					sizeof(struct xfs_dqblk), fa);
-			return fa;
-		}
-	}
-
-	return NULL;
+	return fa;
 }
 
 static xfs_failaddr_t
