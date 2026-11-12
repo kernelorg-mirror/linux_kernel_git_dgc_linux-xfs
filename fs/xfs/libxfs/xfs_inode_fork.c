@@ -86,7 +86,7 @@ xfs_iformat_local(
 	 */
 	if (unlikely(size > XFS_DFORK_SIZE(dip, ip->i_mount, whichfork))) {
 		xfs_warn(ip->i_mount,
-	"corrupt inode %llu (bad size %d for local fork, size = %zd).",
+	"corrupt inode %llu (bad size %d for local fork, size = %u).",
 			(unsigned long long)I_INO(ip), size,
 			XFS_DFORK_SIZE(dip, ip->i_mount, whichfork));
 		xfs_inode_verifier_error(ip, -EFSCORRUPTED,
