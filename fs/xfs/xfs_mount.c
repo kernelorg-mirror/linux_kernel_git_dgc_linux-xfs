@@ -834,6 +834,54 @@ set_limit:
 }
 
 /*
+ * Log recovery can change the on-disk superblock, including the filesystem
+ * geometry if it replays a growfs. Re-read the superblock now that recovery has
+ * finished, and recompute the mount state that is derived from it so the rest
+ * of the mount uses the recovered geometry.
+ */
+static int
+xfs_mount_reinit_fs_geometry(
+	struct xfs_mount	*mp)
+{
+	struct xfs_buf		*bp = mp->m_sb_bp;
+	int			error;
+
+	xfs_buf_lock(bp);
+	xfs_buf_hold(bp);
+	error = _xfs_buf_read(bp);
+	if (error) {
+		if (!xfs_is_shutdown(mp)) {
+			xfs_buf_ioerror_alert(bp, __this_address);
+			ASSERT(0);
+		}
+		xfs_buf_relse(bp);
+		return error;
+	}
+	xfs_sb_from_disk(&mp->m_sb, bp->b_addr);
+	xfs_buf_relse(bp);
+
+	xfs_sb_mount_rextsize(mp, &mp->m_sb);
+	mp->m_features |= xfs_sb_version_to_features(&mp->m_sb);
+	xfs_reinit_percpu_counters(mp);
+
+	xfs_rtrmapbt_compute_maxlevels(mp);
+	xfs_rtrefcountbt_compute_maxlevels(mp);
+	xfs_rtbtree_compute_maxlevels(mp);
+
+	error = xfs_rtmount_init(mp);
+	if (error) {
+		xfs_warn(mp, "RT mount failed");
+		return error;
+	}
+
+	xfs_set_low_space_thresholds(mp);
+
+	/* The reservations depend on all of the above. */
+	xfs_trans_resv_calc(mp, M_RES(mp));
+	return 0;
+}
+
+/*
  * This function does the following on an initial mount of a file system:
  *	- reads the superblock from disk and init the mount struct
  *	- if we're a 32-bit kernel, do a size check on the superblock
@@ -1045,6 +1093,17 @@ xfs_mountfs(
 	if (error) {
 		xfs_warn(mp, "log mount failed");
 		goto out_inodegc_shrinker;
+	}
+
+	/*
+	 * If the log was dirty, recovery may have changed the filesystem
+	 * geometry. Re-read the superblock and reinitialise the mount geometry
+	 * structures derived from it.
+	 */
+	if (xlog_recovery_needed(mp->m_log)) {
+		error = xfs_mount_reinit_fs_geometry(mp);
+		if (error)
+			goto out_free_metadir;
 	}
 
 	/*
