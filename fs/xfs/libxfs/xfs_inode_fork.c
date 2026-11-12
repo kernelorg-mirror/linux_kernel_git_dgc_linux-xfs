@@ -203,7 +203,7 @@ xfs_iformat_btree(
 		     xfs_bmdr_space_calc(nrecs) >
 					XFS_DFORK_SIZE(dip, mp, whichfork) ||
 		     ifp->if_nextents > ip->i_nblocks) ||
-		     level == 0 || level > XFS_BM_MAXLEVELS(mp, whichfork)) {
+		     level == 0 || level >= XFS_BM_MAXLEVELS(mp, whichfork)) {
 		xfs_warn(mp, "corrupt inode %llu (btree).",
 					(unsigned long long)I_INO(ip));
 		xfs_inode_verifier_error(ip, -EFSCORRUPTED,

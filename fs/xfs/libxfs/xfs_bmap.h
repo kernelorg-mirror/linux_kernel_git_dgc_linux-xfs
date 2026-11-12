@@ -199,6 +199,8 @@ int xfs_bmap_local_to_extents(struct xfs_trans *tp, struct xfs_inode *ip,
 				void *priv),
 		void *priv);
 void	xfs_bmap_compute_maxlevels(struct xfs_mount *mp, int whichfork);
+void	xfs_bmap_compute_maxlevels_minlogsize(struct xfs_mount *mp,
+		int whichfork);
 int	xfs_bmap_first_unused(struct xfs_trans *tp, struct xfs_inode *ip,
 		xfs_extlen_t len, xfs_fileoff_t *unused, int whichfork);
 int	xfs_bmap_last_before(struct xfs_trans *tp, struct xfs_inode *ip,

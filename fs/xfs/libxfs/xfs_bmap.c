@@ -49,13 +49,53 @@ struct kmem_cache		*xfs_bmap_intent_cache;
  */
 
 /*
- * Compute and fill in the value of the maximum depth of a bmap btree
- * in this filesystem.  Done once, during mount.
+ * Compute and fill in the value of the maximum height of a bmap btree in this
+ * filesystem, including the inode root level.  Done once, during mount.
+ *
+ * The worst case tree has every block at minimum fill. The root lives in the
+ * inode and holds far fewer pointers than a disk block, so disk levels are
+ * added until all the blocks of the top disk level can be pointed to from the
+ * inode root, then the inode root level is added on top.
  */
 void
 xfs_bmap_compute_maxlevels(
-	xfs_mount_t	*mp,		/* file system mount structure */
-	int		whichfork)	/* data or attr fork */
+	struct xfs_mount	*mp,
+	int			whichfork)
+{
+	uint64_t		maxblocks;
+	xfs_extnum_t		maxleafents;
+	int			level;
+	int			maxrootrecs;
+	int			sz;
+
+	maxleafents = xfs_iext_max_nextents(xfs_has_large_extent_counts(mp),
+				whichfork);
+	if (whichfork == XFS_DATA_FORK)
+		sz = xfs_bmdr_space_calc(MINDBTPTRS);
+	else
+		sz = xfs_bmdr_space_calc(MINABTPTRS);
+	maxrootrecs = xfs_bmdr_maxrecs(sz, 0);
+
+	maxblocks = howmany_64(maxleafents, mp->m_bmap_dmnr[0]);
+	for (level = 1; maxblocks > maxrootrecs; level++)
+		maxblocks = howmany_64(maxblocks, mp->m_bmap_dmnr[1]);
+
+	/* Add the inode root level. */
+	mp->m_bm_maxlevels[whichfork] = level + 1;
+	ASSERT(mp->m_bm_maxlevels[whichfork] <= xfs_bmbt_maxlevels_ondisk());
+}
+
+/*
+ * Legacy calculation of the maximum height of a bmap btree. This stops once a
+ * level reduces to a single block without accounting for the inode root above
+ * it, so it is one level short for most geometries. The minimum log size is
+ * derived from transaction reservations sized by this value, so it is only used
+ * to compute the minimum log size.
+ */
+void
+xfs_bmap_compute_maxlevels_minlogsize(
+	struct xfs_mount	*mp,
+	int			whichfork)
 {
 	uint64_t	maxblocks;	/* max blocks at this level */
 	xfs_extnum_t	maxleafents;	/* max leaf entries possible */

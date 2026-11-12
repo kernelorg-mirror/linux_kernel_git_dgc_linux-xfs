@@ -421,7 +421,7 @@ xfs_bmbt_verify(
 	 * precise.
 	 */
 	level = be16_to_cpu(block->bb_level);
-	if (level > max(mp->m_bm_maxlevels[0], mp->m_bm_maxlevels[1]))
+	if (level >= max(mp->m_bm_maxlevels[0], mp->m_bm_maxlevels[1]))
 		return __this_address;
 
 	return xfs_btree_fsblock_verify(bp, mp->m_bmap_dmxr[level != 0]);

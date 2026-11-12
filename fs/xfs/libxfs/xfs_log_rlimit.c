@@ -14,6 +14,7 @@
 #include "xfs_trans_space.h"
 #include "xfs_da_btree.h"
 #include "xfs_bmap_btree.h"
+#include "xfs_bmap.h"
 #include "xfs_trace.h"
 
 /*
@@ -50,7 +51,8 @@ xfs_want_minlogsize_fixes(
  */
 STATIC int
 xfs_log_calc_max_attrsetm_res(
-	struct xfs_mount	*mp)
+	struct xfs_mount		*mp,
+	const struct xfs_trans_resv	*resv)
 {
 	int			size;
 	int			nblks;
@@ -70,21 +72,20 @@ xfs_log_calc_max_attrsetm_res(
 
 	nblks += XFS_NEXTENTADD_SPACE_RES(mp, size, XFS_ATTR_FORK);
 
-	return  M_RES(mp)->tr_attrsetm.tr_logres +
-		M_RES(mp)->tr_attrsetrt.tr_logres * nblks;
+	return  resv->tr_attrsetm.tr_logres +
+		resv->tr_attrsetrt.tr_logres * nblks;
 }
 
 /*
  * Compute an alternate set of log reservation sizes for use exclusively with
- * minimum log size calculations.
+ * minimum log size calculations. The caller must have set up the legacy btree
+ * heights.
  */
 static void
 xfs_log_calc_trans_resv_for_minlogblocks(
 	struct xfs_mount	*mp,
 	struct xfs_trans_resv	*resv)
 {
-	unsigned int		rmap_maxlevels = mp->m_rmap_maxlevels;
-
 	/*
 	 * If the feature set is new enough, drop the oversized minimum log
 	 * size computation introduced by the original reflink code.
@@ -94,17 +95,6 @@ xfs_log_calc_trans_resv_for_minlogblocks(
 		resv->tr_atomic_ioend = M_RES(mp)->tr_atomic_ioend;
 		return;
 	}
-
-	/*
-	 * In the early days of rmap+reflink, we always set the rmap maxlevels
-	 * to 9 even if the AG was small enough that it would never grow to
-	 * that height.  Transaction reservation sizes influence the minimum
-	 * log size calculation, which influences the size of the log that mkfs
-	 * creates.  Use the old value here to ensure that newly formatted
-	 * small filesystems will mount on older kernels.
-	 */
-	if (xfs_has_rmapbt(mp) && xfs_has_reflink(mp))
-		mp->m_rmap_maxlevels = XFS_OLD_REFLINK_RMAP_MAXLEVELS;
 
 	xfs_trans_resv_calc(mp, resv);
 
@@ -141,15 +131,15 @@ xfs_log_calc_trans_resv_for_minlogblocks(
 			xfs_calc_itruncate_reservation_minlogsize(mp);
 	resv->tr_qm_dqalloc.tr_logres =
 			xfs_calc_qm_dqalloc_reservation_minlogsize(mp);
-
-	/* Put everything back the way it was.  This goes at the end. */
-	mp->m_rmap_maxlevels = rmap_maxlevels;
 }
 
 /*
  * Iterate over the log space reservation table to figure out and return
- * the maximum one in terms of the pre-calculated values which were done
- * at mount time.
+ * the maximum one for the minimum log size calculation.
+ *
+ * The minimum log size must not change for existing filesystems, so the
+ * reservations are calculated with legacy btree heights. This temporarily
+ * changes mount-wide state, so it can only be used at mkfs and mount time.
  */
 void
 xfs_log_get_max_trans_res(
@@ -159,13 +149,43 @@ xfs_log_get_max_trans_res(
 	struct xfs_trans_resv	resv = {};
 	struct xfs_trans_res	*resp;
 	struct xfs_trans_res	*end_resp;
+	unsigned int		rmap_maxlevels = mp->m_rmap_maxlevels;
+	unsigned int		bm_maxlevels[2] = {
+		mp->m_bm_maxlevels[XFS_DATA_FORK],
+		mp->m_bm_maxlevels[XFS_ATTR_FORK],
+	};
 	unsigned int		i;
 	int			log_space = 0;
 	int			attr_space;
 
-	attr_space = xfs_log_calc_max_attrsetm_res(mp);
+	/*
+	 * The minimum log size was always computed with the legacy bmap btree
+	 * height, which is one level short for most geometries. Use it here so
+	 * the minimum log size does not change.
+	 */
+	xfs_bmap_compute_maxlevels_minlogsize(mp, XFS_DATA_FORK);
+	xfs_bmap_compute_maxlevels_minlogsize(mp, XFS_ATTR_FORK);
+
+	/*
+	 * In the early days of rmap+reflink, we always set the rmap maxlevels
+	 * to 9 even if the AG was small enough that it would never grow to
+	 * that height.  Transaction reservation sizes influence the minimum
+	 * log size calculation, which influences the size of the log that mkfs
+	 * creates.  Use the old value here to ensure that newly formatted
+	 * small filesystems will mount on older kernels. Feature sets new
+	 * enough for the minimum log size fixes do not need this.
+	 */
+	if (!xfs_want_minlogsize_fixes(&mp->m_sb) &&
+	    xfs_has_rmapbt(mp) && xfs_has_reflink(mp))
+		mp->m_rmap_maxlevels = XFS_OLD_REFLINK_RMAP_MAXLEVELS;
 
 	xfs_log_calc_trans_resv_for_minlogblocks(mp, &resv);
+	attr_space = xfs_log_calc_max_attrsetm_res(mp, &resv);
+
+	/* Put everything back the way it was. */
+	mp->m_rmap_maxlevels = rmap_maxlevels;
+	mp->m_bm_maxlevels[XFS_DATA_FORK] = bm_maxlevels[XFS_DATA_FORK];
+	mp->m_bm_maxlevels[XFS_ATTR_FORK] = bm_maxlevels[XFS_ATTR_FORK];
 
 	resp = (struct xfs_trans_res *)&resv;
 	end_resp = (struct xfs_trans_res *)(&resv + 1);
