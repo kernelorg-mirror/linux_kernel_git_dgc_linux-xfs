@@ -42,6 +42,8 @@ xlog_clear_stale_blocks(
 STATIC int
 xlog_do_recovery_pass(
         struct xlog *, xfs_daddr_t, xfs_daddr_t, int, xfs_daddr_t *);
+STATIC struct xlog_op_header *
+xlog_recover_validate_ophdr(struct xlog *log, char *dp, char *end, bool quiet);
 
 /*
  * Sector aligned buffer routines for buffer create/read/write/access
@@ -1169,8 +1171,18 @@ xlog_check_unmount_rec(
 		if (error)
 			return error;
 
-		op_head = (struct xlog_op_header *)offset;
-		if (op_head->oh_flags & XLOG_UNMOUNT_TRANS) {
+		/*
+		 * The log has not been checked for torn writes yet, so this
+		 * record cannot be trusted until its ophdr has been validated.
+		 * Only a valid unmount record makes the log clean. Anything else
+		 * is not an error here: the log is treated as dirty, and head
+		 * verification and recovery deal with the record.
+		 */
+		op_head = xlog_recover_validate_ophdr(log, offset,
+				offset + BBSIZE, true);
+		if (IS_ERR(op_head))
+			return 0;
+		if (op_head->oh_flags == XLOG_UNMOUNT_TRANS) {
 			/*
 			 * Set tail and last sync so that newly written log
 			 * records will point recovery to after the current
@@ -2583,9 +2595,11 @@ xlog_recovery_process_trans(
 
 	/* unexpected flag values */
 	case XLOG_UNMOUNT_TRANS:
-		/* just skip trans */
-		xfs_warn(log->l_mp, "%s: Unmount LR", __func__);
-		freeit = true;
+		/* An unmount record never belongs to a checkpoint. */
+		xfs_warn(log->l_mp,
+			"%s: unmount record in transaction 0x%x",
+			__func__, trans->r_log_tid);
+		error = -EFSCORRUPTED;
 		break;
 	case XLOG_START_TRANS:
 	default:
@@ -2650,11 +2664,80 @@ xlog_recover_ophdr_to_trans(
 }
 
 /*
+ * Validate an unmount record. The unmount record is the only record written by
+ * the log itself rather than by a transaction, and the log item processing loop
+ * skips it, so it can only be validated here. It is a single fixed size region,
+ * written by the log with the XFS_LOG clientid, containing an unmount format
+ * structure with a known magic number and zeroed padding.
+ *
+ * The ophdr has already been validated, so oh_len is known to be within the
+ * record. The unmount format length was incorrectly written for a period of
+ * time as zero rather than the region length. Such a record has no payload to
+ * read, so accept it with a warning and stop, so that filesystems written by
+ * those kernels still recover. That warning is always emitted, as the record
+ * is accepted. @quiet suppresses only the warnings for a rejected record.
+ */
+STATIC int
+xlog_recover_validate_unmount_record(
+	struct xlog			*log,
+	struct xlog_op_header		*ohead,
+	bool				quiet)
+{
+	struct xfs_unmount_log_format	*ulf;
+	unsigned int			len = be32_to_cpu(ohead->oh_len);
+
+	if (ohead->oh_clientid != XFS_LOG) {
+		if (!quiet)
+			xfs_warn(log->l_mp, "%s: bad unmount clientid 0x%x",
+				__func__, ohead->oh_clientid);
+		return -EFSCORRUPTED;
+	}
+
+	if (len == 0) {
+		xfs_warn(log->l_mp,
+			"%s: zero length unmount record recovered.", __func__);
+		return 0;
+	}
+
+	if (len != sizeof(*ulf)) {
+		if (!quiet)
+			xfs_warn(log->l_mp, "%s: bad unmount record length 0x%x",
+				__func__, len);
+		return -EFSCORRUPTED;
+	}
+
+	/*
+	 * The magic number is written in host byte order, and a clean log can be
+	 * mounted on a host of either endianness, so accept both byte orders.
+	 */
+	ulf = (struct xfs_unmount_log_format *)(ohead + 1);
+	if (ulf->magic != XLOG_UNMOUNT_TYPE &&
+	    ulf->magic != swab16(XLOG_UNMOUNT_TYPE)) {
+		if (!quiet)
+			xfs_warn(log->l_mp,
+				"%s: bad unmount magic 0x%x, expected 0x%x",
+				__func__, ulf->magic, XLOG_UNMOUNT_TYPE);
+		return -EFSCORRUPTED;
+	}
+
+	if (ulf->pad1 != 0 || ulf->pad2 != 0) {
+		if (!quiet)
+			xfs_warn(log->l_mp, "%s: bad unmount padding", __func__);
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
+/*
  * Decode and validate an operation header from the journal. dp points at the
  * ophdr within the log record and end is the end of the record data. The ophdr
  * and its data region come straight from the on-disk log and cannot be trusted,
  * so decode the header in place and check its fields for known values and
  * obvious corruption here, in one place, before anything acts on them.
+ *
+ * A caller probing for a record that may legitimately not be there sets @quiet
+ * to suppress the warnings for an ophdr that fails validation.
  *
  * Returns the validated ophdr, or an ERR_PTR() on corruption.
  */
@@ -2662,10 +2745,12 @@ STATIC struct xlog_op_header *
 xlog_recover_validate_ophdr(
 	struct xlog		*log,
 	char			*dp,
-	char			*end)
+	char			*end,
+	bool			quiet)
 {
 	struct xlog_op_header	*ohead;
 	unsigned int		len;
+	int			error;
 
 	/*
 	 * All log regions are 32 bit aligned, so the ophdr must be too. A
@@ -2673,13 +2758,15 @@ xlog_recover_validate_ophdr(
 	 * the on-disk layout.
 	 */
 	if (dp != PTR_ALIGN(dp, sizeof(uint32_t))) {
-		xfs_warn(log->l_mp, "%s: unaligned op header", __func__);
+		if (!quiet)
+			xfs_warn(log->l_mp, "%s: unaligned op header", __func__);
 		return ERR_PTR(-EFSCORRUPTED);
 	}
 
 	/* The ophdr itself must fit within the record. */
 	if (dp + sizeof(*ohead) > end) {
-		xfs_warn(log->l_mp, "%s: op header overrun", __func__);
+		if (!quiet)
+			xfs_warn(log->l_mp, "%s: op header overrun", __func__);
 		return ERR_PTR(-EFSCORRUPTED);
 	}
 
@@ -2689,7 +2776,9 @@ xlog_recover_validate_ophdr(
 
 	/* Check the ophdr contains all the data it is supposed to contain. */
 	if (dp + len > end) {
-		xfs_warn(log->l_mp, "%s: bad length 0x%x", __func__, len);
+		if (!quiet)
+			xfs_warn(log->l_mp, "%s: bad length 0x%x", __func__,
+				len);
 		return ERR_PTR(-EFSCORRUPTED);
 	}
 
@@ -2698,7 +2787,9 @@ xlog_recover_validate_ophdr(
 	 * misaligned length desyncs the walk over the ophdrs in the record.
 	 */
 	if (!IS_ALIGNED(len, sizeof(uint32_t))) {
-		xfs_warn(log->l_mp, "%s: unaligned length 0x%x", __func__, len);
+		if (!quiet)
+			xfs_warn(log->l_mp, "%s: unaligned length 0x%x",
+				__func__, len);
 		return ERR_PTR(-EFSCORRUPTED);
 	}
 
@@ -2711,22 +2802,26 @@ xlog_recover_validate_ophdr(
 	 */
 	BUILD_BUG_ON(XFS_XATTR_SIZE_MAX > XFS_MAX_BLOCKSIZE);
 	if (len > XFS_MAX_BLOCKSIZE) {
-		xfs_warn(log->l_mp, "%s: length 0x%x too large", __func__, len);
+		if (!quiet)
+			xfs_warn(log->l_mp, "%s: length 0x%x too large",
+				__func__, len);
 		return ERR_PTR(-EFSCORRUPTED);
 	}
 
 	/* Do we understand who wrote this op? */
 	if (ohead->oh_clientid != XFS_TRANSACTION &&
 	    ohead->oh_clientid != XFS_LOG) {
-		xfs_warn(log->l_mp, "%s: bad clientid 0x%x",
-			__func__, ohead->oh_clientid);
+		if (!quiet)
+			xfs_warn(log->l_mp, "%s: bad clientid 0x%x",
+				__func__, ohead->oh_clientid);
 		return ERR_PTR(-EFSCORRUPTED);
 	}
 
 	/* The padding is always written as zero. */
 	if (ohead->oh_res2 != 0) {
-		xfs_warn(log->l_mp, "%s: bad padding 0x%x",
-			__func__, ohead->oh_res2);
+		if (!quiet)
+			xfs_warn(log->l_mp, "%s: bad padding 0x%x",
+				__func__, ohead->oh_res2);
 		return ERR_PTR(-EFSCORRUPTED);
 	}
 
@@ -2744,20 +2839,27 @@ xlog_recover_validate_ophdr(
 		 * no data of their own.
 		 */
 		if (len != 0) {
-			xfs_warn(log->l_mp, "%s: bad control record length 0x%x",
-				__func__, len);
+			if (!quiet)
+				xfs_warn(log->l_mp,
+					"%s: bad control record length 0x%x",
+					__func__, len);
 			return ERR_PTR(-EFSCORRUPTED);
 		}
+		break;
+	case XLOG_UNMOUNT_TRANS:
+		error = xlog_recover_validate_unmount_record(log, ohead, quiet);
+		if (error)
+			return ERR_PTR(error);
 		break;
 	case 0:
 	case XLOG_CONTINUE_TRANS:
 	case XLOG_WAS_CONT_TRANS | XLOG_CONTINUE_TRANS:
 	case XLOG_WAS_CONT_TRANS | XLOG_END_TRANS:
-	case XLOG_UNMOUNT_TRANS:
 		break;
 	default:
-		xfs_warn(log->l_mp, "%s: bad flags 0x%x",
-			__func__, ohead->oh_flags);
+		if (!quiet)
+			xfs_warn(log->l_mp, "%s: bad flags 0x%x",
+				__func__, ohead->oh_flags);
 		return ERR_PTR(-EFSCORRUPTED);
 	}
 
@@ -2779,7 +2881,7 @@ xlog_recover_process_ophdr(
 	unsigned int		len;
 	int			error;
 
-	ohead = xlog_recover_validate_ophdr(log, dp, end);
+	ohead = xlog_recover_validate_ophdr(log, dp, end, false);
 	if (IS_ERR(ohead))
 		return PTR_ERR(ohead);
 
