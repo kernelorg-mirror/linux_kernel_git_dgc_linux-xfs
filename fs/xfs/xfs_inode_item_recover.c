@@ -530,6 +530,173 @@ xlog_dinode_verify_bmbt_root(
 }
 
 /*
+ * Verify a logged rt rmap btree root, as for the bmap btree root. The node
+ * pointers are filesystem block numbers and are checked here.
+ */
+static xfs_failaddr_t
+xlog_dinode_verify_rtrmap_root(
+	struct xfs_mount		*mp,
+	struct xfs_log_dinode		*ldip,
+	void				*src,
+	unsigned int			size)
+{
+	struct xfs_btree_block		*block = src;
+	xfs_failaddr_t			fa;
+	unsigned int			level;
+	unsigned int			numrecs;
+	unsigned int			i;
+
+	if (size < XFS_RTRMAP_BLOCK_LEN)
+		return __this_address;
+
+	/*
+	 * The maximum rtrmap btree height depends on the filesystem geometry,
+	 * which a growfs being recovered can change. The geometry this item
+	 * will be replayed against is not known yet, so bound the root level by
+	 * the largest height any geometry allows. The root is checked against
+	 * the real geometry when the inode is loaded after recovery. Tighter
+	 * validation depends on solving the recovery geometry problem described
+	 * in the log recovery validation design document.
+	 */
+	fa = xfs_btree_check_fsblock_root_hdr(mp, XFS_RTRMAP_CRC_MAGIC,
+			xfs_rtrmapbt_maxrecs(mp, size,
+				be16_to_cpu(block->bb_level) == 0),
+			block, 0, xfs_rtrmapbt_maxlevels_ondisk() - 1);
+	if (fa)
+		return fa;
+
+	/*
+	 * rtrmap inodes can be dynamically created by growfs, resulting in a
+	 * transient state on disk where they can have no contents. Only a level
+	 * zero root may be empty.
+	 */
+	level = be16_to_cpu(block->bb_level);
+	numrecs = be16_to_cpu(block->bb_numrecs);
+	if (level > 0 && numrecs == 0)
+		return __this_address;
+
+	if (size != xfs_rtrmap_broot_space_calc(level, numrecs))
+		return __this_address;
+
+	/*
+	 * A leaf root holds records whose bounds are relative to a realtime
+	 * group. The realtime groups are not set up until long after log
+	 * recovery runs, so the leaf contents cannot be validated here. That is
+	 * deferred to the first runtime access to the root block.
+	 */
+	if (level == 0)
+		return NULL;
+
+	for (i = 1; i <= numrecs; i++) {
+		xfs_rtrmap_ptr_t	*ptr = xfs_rtrmap_broot_ptr_addr(mp,
+						block, i, size);
+
+		if (!xfs_verify_fsbno(mp, be64_to_cpu(*ptr)))
+			return __this_address;
+	}
+
+	return NULL;
+}
+
+/*
+ * Verify a logged rt refcount btree root, as for the rt rmap btree root.
+ */
+static xfs_failaddr_t
+xlog_dinode_verify_rtrefcount_root(
+	struct xfs_mount		*mp,
+	struct xfs_log_dinode		*ldip,
+	void				*src,
+	unsigned int			size)
+{
+	struct xfs_btree_block		*block = src;
+	xfs_failaddr_t			fa;
+	unsigned int			level;
+	unsigned int			numrecs;
+	unsigned int			i;
+
+	if (size < XFS_RTREFCOUNT_BLOCK_LEN)
+		return __this_address;
+
+	/*
+	 * The maximum rtrefcount btree height depends on the filesystem
+	 * geometry, which a growfs being recovered can change. The geometry
+	 * this item will be replayed against is not known yet, so bound the
+	 * root level by the largest height any geometry allows. The root is
+	 * checked against the real geometry when the inode is loaded after
+	 * recovery. Tighter validation depends on solving the recovery geometry
+	 * problem described in the log recovery validation design document.
+	 */
+	fa = xfs_btree_check_fsblock_root_hdr(mp, XFS_RTREFC_CRC_MAGIC,
+			xfs_rtrefcountbt_maxrecs(mp, size,
+				be16_to_cpu(block->bb_level) == 0),
+			block, 0, xfs_rtrefcountbt_maxlevels_ondisk() - 1);
+	if (fa)
+		return fa;
+
+	/*
+	 * rtrefcount inodes can be dynamically created by growfs, resulting in
+	 * a transient state on disk where they can have no contents. Only a
+	 * level zero root may be empty.
+	 */
+	level = be16_to_cpu(block->bb_level);
+	numrecs = be16_to_cpu(block->bb_numrecs);
+	if (level > 0 && numrecs == 0)
+		return __this_address;
+
+	if (size != xfs_rtrefcount_broot_space_calc(level, numrecs))
+		return __this_address;
+
+	/*
+	 * A leaf root holds records whose bounds are relative to a realtime
+	 * group. The realtime groups are not set up until long after log
+	 * recovery runs, so the leaf contents cannot be validated here. That is
+	 * deferred to the first runtime access to the root block.
+	 */
+	if (level == 0)
+		return NULL;
+
+	for (i = 1; i <= numrecs; i++) {
+		xfs_rtrefcount_ptr_t	*ptr = xfs_rtrefcount_broot_ptr_addr(mp,
+						block, i, size);
+
+		if (!xfs_verify_fsbno(mp, be64_to_cpu(*ptr)))
+			return __this_address;
+	}
+
+	return NULL;
+}
+
+/*
+ * Verify a logged metadata btree root. The metadata btree type is fixed by the
+ * inode, so it is chosen from the log dinode metadata type.
+ */
+static xfs_failaddr_t
+xlog_dinode_verify_metabtree_root(
+	struct xfs_mount		*mp,
+	struct xfs_log_dinode		*ldip,
+	void				*src,
+	unsigned int			size)
+{
+	/*
+	 * growfs creates these inodes before it adds a realtime volume, so gate
+	 * them on the btree feature rather than the realtime btree feature, as
+	 * the root loaders do.
+	 */
+	switch (ldip->di_metatype) {
+	case XFS_METAFILE_RTRMAP:
+		if (!xfs_has_rmapbt(mp))
+			return __this_address;
+		return xlog_dinode_verify_rtrmap_root(mp, ldip, src, size);
+	case XFS_METAFILE_RTREFCOUNT:
+		if (!xfs_has_reflink(mp))
+			return __this_address;
+		return xlog_dinode_verify_rtrefcount_root(mp, ldip, src, size);
+	default:
+		return __this_address;
+	}
+}
+
+/*
  * Verify a logged shortform symlink target. The logged target is the on-disk
  * form, which is not null terminated, so this cannot use
  * xfs_symlink_shortform_verify().
@@ -635,7 +802,8 @@ xlog_dinode_verify_dfork(
 	case XFS_DINODE_FMT_META_BTREE:
 		if (field != XFS_ILOG_DBROOT)
 			return __this_address;
-		break;
+		return xlog_dinode_verify_metabtree_root(mp, ldip,
+				item->ri_buf[2].iov_base, ilfp->ilf_dsize);
 	}
 
 	return NULL;
