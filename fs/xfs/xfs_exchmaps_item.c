@@ -324,14 +324,12 @@ xfs_exchmaps_abort_intent(
 static inline bool
 xfs_xmi_validate(
 	struct xfs_mount		*mp,
-	struct xfs_xmi_log_item		*xmi_lip)
+	struct xfs_xmi_log_format	*xlf)
 {
-	struct xfs_xmi_log_format	*xlf = &xmi_lip->xmi_format;
-
 	if (!xfs_has_exchange_range(mp))
 		return false;
 
-	if (xmi_lip->xmi_format.__pad != 0)
+	if (xlf->__pad != 0)
 		return false;
 
 	if (xlf->xmi_flags & ~XFS_EXCHMAPS_LOGGED_FLAGS)
@@ -447,13 +445,7 @@ xfs_exchmaps_recover_work(
 	struct xfs_inode		*ip1, *ip2;
 	int				error = 0;
 
-	if (!xfs_xmi_validate(mp, xmi_lip)) {
-		XFS_CORRUPTION_ERROR(__func__, XFS_ERRLEVEL_LOW, mp,
-				&xmi_lip->xmi_format,
-				sizeof(xmi_lip->xmi_format));
-		return -EFSCORRUPTED;
-	}
-
+	/* The xmi was validated when it was recovered. */
 	xmi = xfs_xmi_item_recover_intent(mp, dfp, &xmi_lip->xmi_format, &req,
 			&ip1, &ip2);
 	if (IS_ERR(xmi))
@@ -569,32 +561,54 @@ xlog_recover_xmi_commit_pass2(
 	struct xfs_mount		*mp = log->l_mp;
 	struct xfs_xmi_log_item		*xmi_lip;
 	struct xfs_xmi_log_format	*xmi_formatp;
-	size_t				len;
-
-	len = sizeof(struct xfs_xmi_log_format);
-	if (item->ri_buf[0].iov_len != len) {
-		XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW,
-				 -EFSCORRUPTED, log->l_mp);
-		return -EFSCORRUPTED;
-	}
 
 	xmi_formatp = item->ri_buf[0].iov_base;
-	if (xmi_formatp->__pad != 0) {
-		XFS_ERROR_REPORT(__func__, XFS_ERRLEVEL_LOW,
-				 -EFSCORRUPTED, log->l_mp);
-		return -EFSCORRUPTED;
-	}
 
 	xmi_lip = xfs_xmi_init(mp);
-	memcpy(&xmi_lip->xmi_format, xmi_formatp, len);
+	memcpy(&xmi_lip->xmi_format, xmi_formatp,
+			sizeof(struct xfs_xmi_log_format));
 
 	xlog_recover_intent_item(log, &xmi_lip->xmi_item, lsn,
 			&xfs_exchmaps_defer_type);
 	return 0;
 }
 
+/* The xmi is a single fixed size region. */
+static int
+xlog_recover_xmi_validate_region(
+	struct xlog			*log,
+	struct xlog_recover_item	*item,
+	int				region_index)
+{
+	if (item->ri_buf[region_index].iov_len !=
+			sizeof(struct xfs_xmi_log_format)) {
+		xfs_warn(log->l_mp, "XMI: bad item region length %zu recovered.",
+				item->ri_buf[region_index].iov_len);
+		return -EFSCORRUPTED;
+	}
+	return 0;
+}
+
+/* Validate the mapping exchange parameters in the xmi. */
+static int
+xlog_recover_xmi_validate_item(
+	struct xlog			*log,
+	struct xlog_recover_item	*item)
+{
+	if (!xfs_xmi_validate(log->l_mp, item->ri_buf[0].iov_base)) {
+		xfs_warn(log->l_mp, "XMI: bad exchange parameters recovered.");
+		return -EFSCORRUPTED;
+	}
+
+	return 0;
+}
+
 const struct xlog_recover_item_ops xlog_xmi_item_ops = {
 	.item_type		= XFS_LI_XMI,
+	.min_hdr_len		= sizeof(struct xfs_xmi_log_format),
+	.validate_nregions	= xlog_recover_single_region,
+	.validate_region	= xlog_recover_xmi_validate_region,
+	.validate_item		= xlog_recover_xmi_validate_item,
 	.commit_pass2		= xlog_recover_xmi_commit_pass2,
 };
 
